@@ -1,0 +1,45 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&family=Fraunces:ital,opsz,wght@0,9..144,100..900;1,9..144,100..900&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  --color-feedy-oat: #F6F4ED;
+  --color-feedy-forest: #1B3C35;
+  --color-feedy-terracotta: #E8A365;
+  --color-feedy-sage: #8BA88E;
+  --color-feedy-sand: #E6E2D3;
+  --font-sans: "DM Sans", sans-serif;
+  --font-serif: "Fraunces", serif;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-feedy-oat);
+    color: var(--color-feedy-forest);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::selection {
+    background-color: var(--color-feedy-terracotta);
+    color: var(--color-feedy-oat);
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-serif);
+    font-weight: 300;
+    letter-spacing: -0.025em;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 1rem);
+}
