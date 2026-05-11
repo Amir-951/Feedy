@@ -1,5 +1,5 @@
 import 'react-native-url-polyfill/auto';
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -14,8 +14,14 @@ import {
   ActivityIndicator,
   LogBox,
   Modal,
+  Linking,
+  Animated,
 } from 'react-native';
-import { Home, Search, Plus, User as UserIcon, LogOut, MapPin, Sparkles, X, Heart, MessageCircle, ChevronRight, Send, Camera, Info, Check, Clock, UtensilsCrossed, Leaf, List, Trash2, Edit, Settings } from 'lucide-react-native';
+import { 
+  Home, Search, Plus, User as UserIcon, LogOut, MapPin, Sparkles, X, Heart, 
+  MessageCircle, ChevronRight, Send, Camera, Info, Check, Clock, 
+  UtensilsCrossed, Leaf, List, Trash2, Edit, Settings, Flame, Zap, ArrowRight, Inbox, Package 
+} from 'lucide-react-native';
 import * as ImagePicker from 'react-native-image-picker';
 import { launchImageLibrary } from 'react-native-image-picker';
 import { decode } from 'base64-arraybuffer';
@@ -30,8 +36,8 @@ LogBox.ignoreLogs(['AuthApiError: Invalid Refresh Token: Refresh Token Not Found
 
 
 // --- SUPABASE CLIENT ---
-const supabaseUrl = SUPABASE_URL || 'https://placeholder.supabase.co';
-const supabaseAnonKey = SUPABASE_ANON_KEY || 'placeholder';
+const supabaseUrl = 'https://uylpjcwtqawcfjzaeuhc.supabase.co';
+const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV5bHBqY3d0cWF3Y2ZqemFldWhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4Mzk4NzYsImV4cCI6MjA5MzQxNTg3Nn0.tnVnYr0s0pbj-a-XF9mE_PqX6__6_t9F0Hj036SyPK4';
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
@@ -42,6 +48,16 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   },
 });
 
+const cleanupExpiredDonations = async () => {
+  try {
+    const now = new Date().toISOString();
+    await supabase
+      .from('donations')
+      .delete()
+      .lt('expires_at', now);
+  } catch (e) {}
+};
+
 // --- THEME ---
 const COLORS = {
   oat: '#F6F4ED',
@@ -50,6 +66,9 @@ const COLORS = {
   sage: '#8F9B82',
   sand: '#E8E4D9',
   white: '#FFFFFF',
+  orange: '#F97316',
+  emerald: '#10B981',
+  rose: '#F43F5E',
 };
 
 // --- GEMINI HELPER ---
@@ -101,16 +120,28 @@ export default function App() {
     }
   }, [session?.user?.id]);
 
+
   const fetchProfile = async (userId: string) => {
+    console.log('App: Fetching profile for', userId);
     setLoadingProfile(true);
-    const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).single();
-    if (data) {
-      setProfile(data);
-    } else {
+    try {
+      const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).single();
+      if (error) {
+        console.warn('App: Profile fetch error:', error.message);
+        setProfile(null);
+      } else if (data) {
+        console.log('App: Profile loaded successfully');
+        setProfile(data);
+      } else {
+        setProfile(null);
+      }
+    } catch (err) {
+      console.error('App: Profile fetch crash:', err);
       setProfile(null);
+    } finally {
+      setInitializing(false);
+      setLoadingProfile(false);
     }
-    setInitializing(false);
-    setLoadingProfile(false);
   };
 
   if (initializing || (session && loadingProfile)) {
@@ -173,7 +204,13 @@ function AuthScreen() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.authContainer}>
-        <Text style={styles.logoBig}>Feedy.</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 20 }}>
+          <Text style={{ fontSize: 40, fontWeight: '900', color: COLORS.forest, letterSpacing: -1 }}>Assiette</Text>
+          <Text style={{ fontSize: 32, fontStyle: 'italic', color: COLORS.emerald, marginHorizontal: 8, fontWeight: '500' }}>en</Text>
+          <View style={{ backgroundColor: COLORS.orange, width: 44, height: 44, borderRadius: 12, justifyContent: 'center', alignItems: 'center', transform: [{ rotate: '15deg' }] }}>
+            <Text style={{ color: COLORS.white, fontWeight: '900', fontSize: 36, marginTop: -4 }}>+</Text>
+          </View>
+        </View>
         <Text style={styles.subtitle}>Partagez plus, gaspillez moins.</Text>
 
         <View style={styles.form}>
@@ -222,7 +259,7 @@ function ProfileSetupScreen({ session, onProfileCreated }: { session: Session, o
   const [error, setError] = useState('');
 
   const pickImage = async () => {
-    const result = await launchImageLibrary({ mediaType: 'photo', quality: 0.8, includeBase64: true });
+    const result = await launchImageLibrary({ mediaType: 'photo', quality: 0.5, maxWidth: 800, includeBase64: true });
     if (result.assets && result.assets[0].uri) {
       setImageUri(result.assets[0].uri);
       setImageBase64(result.assets[0].base64 || null);
@@ -353,6 +390,8 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
   const [recipeLoadingId, setRecipeLoadingId] = useState<string | null>(null);
   const [generatedRecipes, setGeneratedRecipes] = useState<{ [key: string]: string }>({});
   
+  const [userInfoModalVisible, setUserInfoModalVisible] = useState(false);
+  
   // Advanced Filter States
   const [isHalalFilter, setIsHalalFilter] = useState(false);
   const [sortBy, setSortBy] = useState<'time' | 'distance'>('time');
@@ -369,8 +408,58 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
   const [activeChat, setActiveChat] = useState<any>(null);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [chatInput, setChatInput] = useState('');
-  const [editingDonation, setEditingDonation] = useState<any>(null);
+  const [requestedPortions, setRequestedPortions] = useState('1');
+  const [msgFilter, setMsgFilter] = useState('all');
   const [editModalVisible, setEditModalVisible] = useState(false);
+  const [detailsModalVisible, setDetailsModalVisible] = useState(false);
+  const [viewingDonation, setViewingDonation] = useState<any>(null);
+  const [editProfileVisible, setEditProfileVisible] = useState(false);
+  const [editedUsername, setEditedUsername] = useState(profile.username);
+  const [editedAddress, setEditedAddress] = useState(profile.address);
+  
+  // Premium Features States
+  const [karma, setKarma] = useState(1250);
+  const [exploreMode, setExploreMode] = useState<'list' | 'swipe'>('list');
+  const [swipeIndex, setSwipeIndex] = useState(0);
+  const [activeSubPage, setActiveSubPage] = useState<'none' | 'preferences' | 'help' | 'blocked' | 'manage'>('none');
+  const [urgentMission, setUrgentMission] = useState<any>(null);
+  const [usingGPS, setUsingGPS] = useState(false);
+  const [currentAddressName, setCurrentAddressName] = useState('');
+  const [blockedUsers, setBlockedUsers] = useState<string[]>([]);
+  const [targetUserStats, setTargetUserStats] = useState({ received: 0, given: 0 });
+  const [blockSearch, setBlockSearch] = useState('');
+  const [editingDonation, setEditingDonation] = useState<any>(null);
+  const [hasNewNotification, setHasNewNotification] = useState(false);
+  const blinkAnim = useRef(new Animated.Value(1)).current;
+  
+  // User Preferences Functional States
+  const [notifDons, setNotifDons] = useState(true);
+  const [notifMsgs, setNotifMsgs] = useState(true);
+  const [notifMissions, setNotifMissions] = useState(true);
+  const [showGrade, setShowGrade] = useState(true);
+  const [shareExactLocation, setShareExactLocation] = useState(true);
+
+  useEffect(() => {
+    if (hasNewNotification) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(blinkAnim, { toValue: 0.3, duration: 500, useNativeDriver: true }),
+          Animated.timing(blinkAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+        ])
+      ).start();
+    } else {
+      blinkAnim.setValue(1);
+    }
+  }, [hasNewNotification]);
+
+  const getTimeRemaining = (expiresAt: string) => {
+    if (!expiresAt) return "24h";
+    const remaining = new Date(expiresAt).getTime() - new Date().getTime();
+    if (remaining < 0) return "Expiré";
+    const hours = Math.floor(remaining / (1000 * 60 * 60));
+    const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+    return `${hours}h ${minutes}m`;
+  };
 
   const fetchDonations = async () => {
     const { data, error } = await supabase
@@ -383,35 +472,93 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       
     if (data) {
       setDonations(data);
+      // Logic for Mission Sauvetage: Find a donation with many portions or very recent
+      const urgent = data.find(d => parseInt(d.portions) > 5) || data[0];
+      setUrgentMission(urgent);
     }
   };
 
   useEffect(() => {
+    console.log('App: Main effect running');
     fetchDonations();
+    cleanupExpiredDonations();
 
-    // Supabase Realtime Subscription
-    const subscription = supabase
-      .channel('donations_channel')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'donations' }, fetchDonations)
-      .subscribe();
+    // Supabase Realtime Subscription (Donations)
+    let subDonations: any;
+    let subMessages: any;
+    try {
+      subDonations = supabase
+        .channel('donations_channel')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'donations' }, fetchDonations)
+        .subscribe();
+
+      subMessages = supabase
+        .channel('messages_channel')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
+          if (payload.new.sender_id !== session.user.id) {
+            setHasNewNotification(true);
+            if (activeTab !== 'messages') fetchConversations();
+          }
+        })
+        .subscribe();
+    } catch (err) {
+      console.warn('App: Realtime subscription failed', err);
+    }
 
     // Fetch user location
-    Geolocation.requestAuthorization();
-    Geolocation.getCurrentPosition(
-      (position) => {
-        setUserLocation({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        });
-      },
-      (error) => console.log('Location error:', error.message),
-      { enableHighAccuracy: true, timeout: 20000, maximumAge: 10000 }
-    );
+    console.log('App: Requesting geolocation');
+    try {
+      Geolocation.requestAuthorization();
+      Geolocation.getCurrentPosition(
+        (position) => {
+          console.log('App: Location received');
+          setUserLocation({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          });
+        },
+        (error) => console.log('App: Location error:', error.message),
+        { enableHighAccuracy: true, timeout: 20000, maximumAge: 10000 }
+      );
+    } catch (err) {
+      console.warn('App: Geolocation crash prevented', err);
+    }
 
     return () => {
-      supabase.removeChannel(subscription);
+      try {
+        if (subDonations) supabase.removeChannel(subDonations);
+        if (subMessages) supabase.removeChannel(subMessages);
+      } catch (e) {}
     };
   }, []);
+
+  // --- PERSISTENCE & PREFERENCES LOGIC ---
+  useEffect(() => {
+    const loadPrefs = async () => {
+      try {
+        const saved = await AsyncStorage.getItem('user_prefs');
+        if (saved) {
+          const p = JSON.parse(saved);
+          if (p.notifDons !== undefined) setNotifDons(p.notifDons);
+          if (p.notifMsgs !== undefined) setNotifMsgs(p.notifMsgs);
+          if (p.notifMissions !== undefined) setNotifMissions(p.notifMissions);
+          if (p.showGrade !== undefined) setShowGrade(p.showGrade);
+          if (p.shareExactLocation !== undefined) setShareExactLocation(p.shareExactLocation);
+        }
+      } catch (e) {}
+    };
+    loadPrefs();
+  }, []);
+
+  useEffect(() => {
+    const savePrefs = async () => {
+      try {
+        const prefs = { notifDons, notifMsgs, notifMissions, showGrade, shareExactLocation };
+        await AsyncStorage.setItem('user_prefs', JSON.stringify(prefs));
+      } catch (e) {}
+    };
+    savePrefs();
+  }, [notifDons, notifMsgs, notifMissions, showGrade, shareExactLocation]);
 
   const fetchConversations = async () => {
     const { data, error } = await supabase
@@ -437,6 +584,15 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       .order('created_at', { ascending: true });
     
     if (data) setChatMessages(data);
+
+    // Calculate reciprocity stats
+    const otherUserId = conversation.requester_id === session.user.id ? conversation.owner_id : conversation.requester_id;
+    const { data: convs } = await supabase.from('conversations').select('*').eq('status', 'accepted');
+    if (convs) {
+      const received = convs.filter(c => c.requester_id === session.user.id && (c.owner_id === otherUserId)).length;
+      const given = convs.filter(c => c.owner_id === session.user.id && (c.requester_id === otherUserId)).length;
+      setTargetUserStats({ received, given });
+    }
   };
 
   useEffect(() => {
@@ -447,7 +603,8 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
 
   const openRequestModal = (item: any) => {
     setSelectedDonation(item);
-    setRequestMsg('Bonjour, je peux venir récupérer dans 10 min');
+    setRequestMsg(`Bonjour, je suis intéressé par ${item.title} !`);
+    setRequestedPortions('1');
     setRequestModalVisible(true);
   };
 
@@ -473,6 +630,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
             donation_id: selectedDonation.id,
             requester_id: session.user.id,
             owner_id: selectedDonation.user_id,
+            requested_portions: parseInt(requestedPortions),
           })
           .select().single();
         if (convErr) throw convErr;
@@ -523,14 +681,55 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
         .update({ status })
         .eq('id', activeChat.id);
       if (!error) {
+        // AUTOMATIC PORTION DEDUCTION
+        if (status === 'accepted' && activeChat.requested_portions && activeChat.donations) {
+          const currentTotal = parseInt(activeChat.donations.portions) || 0;
+          const requested = activeChat.requested_portions;
+          const newTotal = Math.max(0, currentTotal - requested);
+          
+          await supabase
+            .from('donations')
+            .update({ portions: newTotal.toString() })
+            .eq('id', activeChat.donation_id);
+        }
+
         setActiveChat({ ...activeChat, status });
         fetchConversations();
-        showToast(status === 'accepted' ? 'Demande acceptée !' : 'Demande refusée');
+        showToast(status === 'accepted' ? 'Demande acceptée ! Portions mises à jour.' : 'Demande refusée');
       }
     } catch(e) {}
   };
 
+  const handleDeleteConversation = async (convId: string) => {
+    try {
+      const { error } = await supabase
+        .from('conversations')
+        .delete()
+        .eq('id', convId);
+      if (!error) {
+        showToast("Conversation supprimée");
+        setActiveChat(null);
+        fetchConversations();
+        setUserInfoModalVisible(false);
+      }
+    } catch(e) {}
+  };
+
+  const handleBlockUser = (userId: string) => {
+    if (!blockedUsers.includes(userId)) {
+      setBlockedUsers([...blockedUsers, userId]);
+      showToast("Utilisateur bloqué");
+      setActiveChat(null);
+    }
+  };
+
+  const handleUnblockUser = (userId: string) => {
+    setBlockedUsers(blockedUsers.filter(id => id !== userId));
+    showToast("Utilisateur débloqué");
+  };
+
   const filteredDonations = donations.filter((item) => {
+    if (blockedUsers.includes(item.user_id)) return false; // Hide blocked users
     const matchFilter = filter === 'all' || item.type === filter;
     const matchHalal = !isHalalFilter || item.is_halal;
     const matchSearch =
@@ -584,6 +783,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
   };
 
   const getRealOrMockDistance = (item: any) => {
+    if (!shareExactLocation) return 'À proximité';
     if (userLocation && item.latitude && item.longitude) {
       return calculateDistance(userLocation.lat, userLocation.lng, item.latitude, item.longitude);
     }
@@ -603,6 +803,22 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
           lat: position.coords.latitude,
           lng: position.coords.longitude,
         });
+        
+        // Reverse Geocoding via OpenStreetMap (Nominatim)
+        fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${position.coords.latitude}&lon=${position.coords.longitude}&zoom=18&addressdetails=1`, {
+          headers: { 'User-Agent': 'AssietteEnPlus' }
+        })
+          .then(res => res.json())
+          .then(data => {
+            const addr = data.address;
+            const street = addr.road || addr.pedestrian || addr.suburb || '';
+            const city = addr.city || addr.town || addr.village || '';
+            setCurrentAddressName(`${street}${street && city ? ', ' : ''}${city}` || 'Position détectée');
+          })
+          .catch(() => setCurrentAddressName('Position détectée'));
+
+        setUsingGPS(true);
+        setSortBy('distance');
         showToast('Position mise à jour !');
         fetchDonations();
       },
@@ -670,8 +886,36 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     }
   };
 
+  const handleUpdateProfile = async () => {
+    if (!editedUsername.trim() || !editedAddress.trim()) return;
+    setIsPublishing(true);
+    try {
+      const { error } = await supabase
+        .from('profiles')
+        .update({ username: editedUsername, address: editedAddress })
+        .eq('id', session.user.id);
+      
+      if (!error) {
+        showToast("Profil mis à jour !");
+        setEditProfileVisible(false);
+        // Refresh donations to reflect the new address context
+        fetchDonations();
+      } else {
+        showToast("Erreur lors de la mise à jour");
+      }
+    } catch(e) {
+      showToast("Erreur de connexion");
+    }
+    setIsPublishing(false);
+  };
+
   const pickImage = async () => {
-    const result = await launchImageLibrary({ mediaType: 'photo', quality: 0.8, includeBase64: true });
+    const result = await launchImageLibrary({ 
+      mediaType: 'photo', 
+      quality: 0.5, 
+      maxWidth: 800, 
+      includeBase64: true 
+    });
     if (result.assets && result.assets[0].uri) {
       setImageUri(result.assets[0].uri);
       setImageBase64(result.assets[0].base64 || null);
@@ -695,8 +939,8 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
   };
 
   const handleAddDonation = async () => {
-    if (!newTitle.trim() || !newDesc.trim() || !newAddress.trim()) {
-      showToast('Titre, description et adresse requis');
+    if (!newTitle.trim() || !newAddress.trim()) {
+      showToast('Titre et adresse requis');
       return;
     }
     
@@ -719,6 +963,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
         latitude: userLocation?.lat,
         longitude: userLocation?.lng,
         is_halal: isNewHalal,
+        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24h lifetime
       });
 
       if (error) throw error;
@@ -793,7 +1038,26 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               <>
                 <Text style={styles.modalTitle}>Demande pour :</Text>
                 <Text style={styles.modalDonationTitle}>{selectedDonation.title}</Text>
-                <Text style={styles.modalDonationMeta}>📍 {getMockDistance(selectedDonation.id)} • {getTimeAgo(selectedDonation.created_at)} • {selectedDonation.portions !== 'N/A' ? `${selectedDonation.portions} pers.` : selectedDonation.type}</Text>
+                <Text style={styles.modalDonationMeta}>📍 {getRealOrMockDistance(selectedDonation)} • {getTimeAgo(selectedDonation.created_at)} • {selectedDonation.portions} portions dispos</Text>
+
+                <View style={{ marginTop: 20 }}>
+                  <Text style={styles.label}>COMBIEN DE PORTIONS ?</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                    <TouchableOpacity 
+                      onPress={() => setRequestedPortions(Math.max(1, parseInt(requestedPortions)-1).toString())}
+                      style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
+                    >
+                      <Text style={{ fontSize: 20, fontWeight: 'bold' }}>-</Text>
+                    </TouchableOpacity>
+                    <Text style={{ fontSize: 24, fontWeight: '900', color: COLORS.forest }}>{requestedPortions}</Text>
+                    <TouchableOpacity 
+                      onPress={() => setRequestedPortions(Math.min(parseInt(selectedDonation.portions)||1, parseInt(requestedPortions)+1).toString())}
+                      style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
+                    >
+                      <Text style={{ fontSize: 20, fontWeight: 'bold' }}>+</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
 
                 <Text style={[styles.label, { marginTop: 24 }]}>VOTRE MESSAGE</Text>
                 <TextInput
@@ -814,15 +1078,25 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
 
       {!activeChat && (
         <View style={styles.header}>
-          <Text style={styles.logo}>Feedy.</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={[styles.logo, { fontWeight: '900', letterSpacing: -1 }]}>Assiette</Text>
+            <Text style={{ fontSize: 20, fontStyle: 'italic', color: COLORS.emerald, marginHorizontal: 4, fontWeight: '500' }}>en</Text>
+            <View style={{ backgroundColor: COLORS.orange, width: 22, height: 22, borderRadius: 6, justifyContent: 'center', alignItems: 'center', transform: [{ rotate: '15deg' }] }}>
+              <Text style={{ color: COLORS.white, fontWeight: '900', fontSize: 18, marginTop: -2 }}>+</Text>
+            </View>
+          </View>
+          
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <TouchableOpacity onPress={() => setActiveTab('my_donations')}>
-              <List color={COLORS.forest} size={24} />
+            <TouchableOpacity 
+              onPress={() => setActiveSubPage('manage')}
+              style={{ backgroundColor: COLORS.white, padding: 8, borderRadius: 12, borderWidth: 1, borderColor: COLORS.sand }}
+            >
+              <Package color={COLORS.forest} size={20} />
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setActiveTab('profile')}>
+            <TouchableOpacity onPress={() => setActiveTab('profile')} style={{ padding: 2 }}>
               <Image
                 source={{ uri: profile?.avatar_url ? profile.avatar_url.replace(/ /g, '%20') : 'https://ui-avatars.com/api/?name=Anonyme' }}
-                style={styles.avatarMini}
+        style={styles.avatarMini}
               />
             </TouchableOpacity>
           </View>
@@ -831,94 +1105,212 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
 
       <View style={styles.container}>
         {activeTab === 'explore' && (
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-            <Text style={styles.title}>
-              Partagez plus, {'\n'}
-              <Text style={styles.titleHighlight}>gaspillez moins.</Text>
-            </Text>
-            <Text style={styles.subtitle}>Découvrez les dons autour de vous aujourd'hui.</Text>
+          activeSubPage === 'manage' ? (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+              <TouchableOpacity onPress={() => setActiveSubPage('none')} style={styles.backBtn}>
+                <ArrowRight color={COLORS.forest} size={20} style={{ transform: [{ rotate: '180deg' }] }} />
+                <Text style={styles.backBtnText}>Retour</Text>
+              </TouchableOpacity>
+              <Text style={styles.title}>Mes Annonces</Text>
+              <Text style={styles.subtitle}>Gérez vos dons actifs.</Text>
 
-            <View style={styles.searchBox}>
-              <Search color={COLORS.forest} size={20} opacity={0.5} style={styles.searchIcon} />
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Rechercher..."
-                placeholderTextColor={`${COLORS.forest}70`}
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-              />
-              <TouchableOpacity onPress={refreshLocation} style={{ padding: 8 }}>
-                <MapPin color={COLORS.terracotta} size={20} />
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
-              <TouchableOpacity
-                style={[styles.filterBtn, filter === 'all' && styles.filterBtnActive]}
-                onPress={() => setFilter('all')}
-              >
-                <Text style={[styles.filterText, filter === 'all' && styles.filterTextActive]}>Tout</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity
-                style={[styles.filterBtn, isHalalFilter && styles.filterBtnActiveTerracotta]}
-                onPress={() => setIsHalalFilter(!isHalalFilter)}
-              >
-                <Text style={[styles.filterText, isHalalFilter && styles.filterTextActive]}>☪️ Halal</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.filterBtn, sortBy === 'distance' && styles.filterBtnActiveSage]}
-                onPress={() => setSortBy(sortBy === 'distance' ? 'time' : 'distance')}
-              >
-                <MapPin color={sortBy === 'distance' ? COLORS.oat : COLORS.forest} size={16} style={{ marginRight: 6 }} />
-                <Text style={[styles.filterText, sortBy === 'distance' && styles.filterTextActive]}>Proche</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.filterBtn, filter === 'plat' && styles.filterBtnActiveTerracotta]}
-                onPress={() => setFilter('plat')}
-              >
-                <UtensilsCrossed color={filter === 'plat' ? COLORS.oat : COLORS.forest} size={16} style={{ marginRight: 6 }} />
-                <Text style={[styles.filterText, filter === 'plat' && styles.filterTextActive]}>Plats</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity
-                style={[styles.filterBtn, filter === 'surplus' && styles.filterBtnActiveSage]}
-                onPress={() => setFilter('surplus')}
-              >
-                <Leaf color={filter === 'surplus' ? COLORS.oat : COLORS.forest} size={16} style={{ marginRight: 6 }} />
-                <Text style={[styles.filterText, filter === 'surplus' && styles.filterTextActive]}>Surplus</Text>
-              </TouchableOpacity>
-            </ScrollView>
-
-            <View style={styles.list}>
-              {filteredDonations.length === 0 ? (
-                <Text style={styles.emptyText}>Aucun résultat trouvé.</Text>
-              ) : (
-                filteredDonations.map((item) => (
-                  <View key={item.id} style={styles.card}>
-                    <View style={styles.cardImageContainer}>
-                      <Image source={{ uri: item.image }} style={styles.cardImage} />
-                      <View style={styles.cardBadge}>
-                        {item.type === 'plat' ? <UtensilsCrossed color={COLORS.terracotta} size={14} /> : <Leaf color={COLORS.sage} size={14} />}
-                        <Text style={[styles.cardBadgeText, { color: item.type === 'plat' ? COLORS.terracotta : COLORS.sage }]}>
-                          {item.type === 'plat' ? 'Plat Maison' : 'Surplus'}
-                        </Text>
+              <View style={{ gap: 16, marginTop: 12 }}>
+                {donations.filter(d => d.user_id === session.user.id).length === 0 ? (
+                  <View style={{ alignItems: 'center', marginTop: 40, opacity: 0.3 }}>
+                    <Package color={COLORS.forest} size={48} />
+                    <Text style={{ marginTop: 12, fontWeight: 'bold' }}>Vous n'avez aucun don actif</Text>
+                  </View>
+                ) : (
+                  donations.filter(d => d.user_id === session.user.id).map((item) => (
+                    <View key={item.id} style={styles.manageCard}>
+                      <Image source={{ uri: item.image }} style={styles.manageCardImage} />
+                      <View style={{ flex: 1, marginLeft: 12 }}>
+                        <Text style={styles.manageCardTitle} numberOfLines={1}>{item.title}</Text>
+                        <Text style={styles.manageCardMeta}>{item.portions} portions • {getTimeAgo(item.created_at)}</Text>
+                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                          <TouchableOpacity 
+                            style={[styles.actionBtnSmall, { backgroundColor: `${COLORS.emerald}10` }]} 
+                            onPress={() => {
+                              setEditingDonation(item);
+                              setNewTitle(item.title);
+                              setNewDesc(item.description);
+                              setNewType(item.type);
+                              setNewAddress(item.address || '');
+                              setIsNewHalal(item.is_halal);
+                              setEditModalVisible(true);
+                            }}
+                          >
+                            <Edit color={COLORS.emerald} size={14} />
+                            <Text style={{ color: COLORS.emerald, fontSize: 10, fontWeight: 'bold', marginLeft: 4 }}>MODIFIER</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity 
+                            style={[styles.actionBtnSmall, { backgroundColor: `${COLORS.terracotta}10` }]} 
+                            onPress={() => handleDeleteDonation(item.id)}
+                          >
+                            <Trash2 color={COLORS.terracotta} size={14} />
+                            <Text style={{ color: COLORS.terracotta, fontSize: 10, fontWeight: 'bold', marginLeft: 4 }}>SUPPRIMER</Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                     </View>
-                    
-                    <View style={styles.cardContent}>
-                      <View style={styles.cardHeader}>
-                        <Text style={styles.cardTitle}>{item.title}</Text>
-                        {item.portions !== 'N/A' && (
-                          <View style={styles.portionBadge}>
-                            <Text style={styles.portionText}>{item.portions} pers.</Text>
+                  ))
+                )}
+              </View>
+            </ScrollView>
+          ) : exploreMode === 'list' ? (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+              <Text style={styles.title}>
+                Partagez plus, {'\n'}
+                <Text style={styles.titleHighlight}>gaspillez moins.</Text>
+              </Text>
+              <Text style={styles.subtitle}>Découvrez les dons autour de vous aujourd'hui.</Text>
+
+              {urgentMission && (
+                <View style={{ backgroundColor: COLORS.rose, padding: 16, borderRadius: 24, marginBottom: 20, shadowColor: COLORS.rose, shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 5 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.white }} />
+                    <Text style={{ color: COLORS.white, fontWeight: '900', fontSize: 10, letterSpacing: 1 }}>MISSION SAUVETAGE</Text>
+                  </View>
+                  <Text style={{ color: COLORS.white, fontSize: 12, fontWeight: '600', marginBottom: 12 }}>
+                    <Text style={{ fontWeight: '900' }}>{urgentMission.portions} portions de {urgentMission.title}</Text> d'urgence ! (À {getRealOrMockDistance(urgentMission)})
+                  </Text>
+                  <TouchableOpacity 
+                    onPress={() => {
+                      setSelectedDonation(urgentMission);
+                      setRequestMsg(`Je participe à la mission sauvetage pour : ${urgentMission.title} ! Je peux passer rapidement.`);
+                      setRequestModalVisible(true);
+                    }}
+                    style={{ backgroundColor: 'rgba(255,255,255,0.2)', paddingVertical: 10, borderRadius: 12, alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 6, borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' }}
+                  >
+                    <Text style={{ color: COLORS.white, fontWeight: '900', fontSize: 12 }}>Je participe</Text>
+                    <ArrowRight color={COLORS.white} size={14} />
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              <View style={styles.searchBox}>
+                <Search color={COLORS.forest} size={20} opacity={0.5} style={styles.searchIcon} />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Rechercher..."
+                  placeholderTextColor={`${COLORS.forest}70`}
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                />
+                <TouchableOpacity onPress={refreshLocation} style={{ padding: 8 }}>
+                  <MapPin color={COLORS.terracotta} size={20} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: -12, marginBottom: 20, paddingHorizontal: 4 }}>
+                <MapPin color={usingGPS ? COLORS.emerald : `${COLORS.forest}30`} size={10} />
+                <Text style={{ fontSize: 10, color: `${COLORS.forest}50`, fontWeight: '700' }}>
+                  DONS AUTOUR DE : <Text style={{ color: usingGPS ? COLORS.emerald : COLORS.forest, fontWeight: '900' }}>{usingGPS ? (currentAddressName || 'CHARGEMENT...').toUpperCase() : (profile?.address || 'Position inconnue').toUpperCase()}</Text>
+                </Text>
+                {usingGPS && (
+                  <TouchableOpacity onPress={() => { setUsingGPS(false); setSortBy('time'); }}>
+                    <Text style={{ fontSize: 10, color: COLORS.terracotta, marginLeft: 8, fontWeight: 'bold' }}>[RÉINITIALISER]</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <View style={{ flexDirection: 'row', backgroundColor: `${COLORS.sand}50`, padding: 4, borderRadius: 16, marginBottom: 20 }}>
+                <TouchableOpacity 
+                  onPress={() => setExploreMode('list')}
+                  style={{ flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: exploreMode === 'list' ? COLORS.white : 'transparent', borderRadius: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: exploreMode === 'list' ? 0.1 : 0, shadowRadius: 4, elevation: exploreMode === 'list' ? 2 : 0 }}
+                >
+                  <Text style={{ fontSize: 12, fontWeight: '900', color: exploreMode === 'list' ? COLORS.forest : `${COLORS.forest}50` }}>Liste</Text>
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  onPress={() => { setExploreMode('swipe'); setSwipeIndex(0); }}
+                  style={{ flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: exploreMode === 'swipe' ? COLORS.emerald : 'transparent', borderRadius: 12, shadowColor: COLORS.emerald, shadowOffset: { width: 0, height: 4 }, shadowOpacity: exploreMode === 'swipe' ? 0.3 : 0, shadowRadius: 6, elevation: exploreMode === 'swipe' ? 4 : 0 }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Zap color={exploreMode === 'swipe' ? COLORS.white : `${COLORS.forest}50`} size={14} fill={exploreMode === 'swipe' ? COLORS.white : 'transparent'} />
+                    <Text style={{ fontSize: 12, fontWeight: '900', color: exploreMode === 'swipe' ? COLORS.white : `${COLORS.forest}50` }}>Éclair</Text>
+                  </View>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll}>
+                <TouchableOpacity
+                  style={[styles.filterBtn, filter === 'all' && styles.filterBtnActive]}
+                  onPress={() => setFilter('all')}
+                >
+                  <Text style={[styles.filterText, filter === 'all' && styles.filterTextActive]}>Tout</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, isHalalFilter && styles.filterBtnActiveTerracotta]}
+                  onPress={() => setIsHalalFilter(!isHalalFilter)}
+                >
+                  <Text style={[styles.filterText, isHalalFilter && styles.filterTextActive]}>☪️ Halal</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, sortBy === 'distance' && styles.filterBtnActiveSage]}
+                  onPress={() => setSortBy(sortBy === 'distance' ? 'time' : 'distance')}
+                >
+                  <MapPin color={sortBy === 'distance' ? COLORS.oat : COLORS.forest} size={16} style={{ marginRight: 6 }} />
+                  <Text style={[styles.filterText, sortBy === 'distance' && styles.filterTextActive]}>Proche</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, filter === 'plat' && styles.filterBtnActiveTerracotta]}
+                  onPress={() => setFilter('plat')}
+                >
+                  <UtensilsCrossed color={filter === 'plat' ? COLORS.oat : COLORS.forest} size={16} style={{ marginRight: 6 }} />
+                  <Text style={[styles.filterText, filter === 'plat' && styles.filterTextActive]}>Plats</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, filter === 'surplus' && styles.filterBtnActiveSage]}
+                  onPress={() => setFilter('surplus')}
+                >
+                  <Leaf color={filter === 'surplus' ? COLORS.oat : COLORS.forest} size={16} style={{ marginRight: 6 }} />
+                  <Text style={[styles.filterText, filter === 'surplus' && styles.filterTextActive]}>Surplus</Text>
+                </TouchableOpacity>
+              </ScrollView>
+
+              <View style={styles.list}>
+                {filteredDonations.length === 0 ? (
+                  <Text style={styles.emptyText}>Aucun résultat trouvé.</Text>
+                ) : (
+                  filteredDonations.map((item) => (
+                    <View key={item.id} style={styles.card}>
+                      <TouchableOpacity 
+                        activeOpacity={0.9} 
+                        onPress={() => { setViewingDonation(item); setDetailsModalVisible(true); }}
+                        style={{ flex: 1 }}
+                      >
+                        <View style={styles.cardImageContainer}>
+                          <Image source={{ uri: item.image }} style={styles.cardImage} />
+                          <View style={styles.cardBadge}>
+                            {item.type === 'plat' ? <UtensilsCrossed color={COLORS.terracotta} size={14} /> : <Leaf color={COLORS.sage} size={14} />}
+                            <Text style={[styles.cardBadgeText, { color: item.type === 'plat' ? COLORS.terracotta : COLORS.sage }]}>
+                              {item.type === 'plat' ? 'Plat Maison' : 'Surplus'}
+                            </Text>
                           </View>
-                        )}
-                      </View>
-                      
-                      <Text style={styles.cardDesc} numberOfLines={2}>{item.description}</Text>
+                        </View>
+                        <View style={styles.cardContent}>
+                          <View style={styles.cardHeader}>
+                            <Text style={styles.cardTitle}>{item.title}</Text>
+                            {item.portions && item.portions !== 'N/A' && (
+                              <View style={styles.portionBadge}>
+                                <Text style={styles.portionText}>{item.portions} pers.</Text>
+                              </View>
+                            )}
+                          </View>
+                          <Text style={styles.cardDesc} numberOfLines={2}>{item.description}</Text>
+                          <View style={styles.cardFooter}>
+                            <View style={styles.userInfo}>
+                              <Image source={{ uri: item.profiles?.avatar_url || 'https://ui-avatars.com/api/?name=Anonyme' }} style={styles.userAvatar} />
+                              <View>
+                                <Text style={styles.userName}>{item.profiles?.username || 'Anonyme'}</Text>
+                                <Text style={styles.userMeta}>
+                                  <MapPin color={COLORS.forest} size={10} opacity={0.5} /> {getRealOrMockDistance(item)} • {getTimeAgo(item.created_at)}
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+                        </View>
+                      </TouchableOpacity>
 
                       {item.type === 'surplus' && !generatedRecipes[item.id] && (
                         <TouchableOpacity
@@ -952,27 +1344,56 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                           <Text style={styles.recipeText}>"{generatedRecipes[item.id]}"</Text>
                         </View>
                       )}
-
-                      <View style={styles.cardFooter}>
-                        <View style={styles.userInfo}>
-                          <Image source={{ uri: item.profiles?.avatar_url || 'https://ui-avatars.com/api/?name=Anonyme' }} style={styles.userAvatar} />
-                          <View>
-                            <Text style={styles.userName}>{item.profiles?.username || 'Anonyme'}</Text>
-                            <Text style={styles.userMeta}>
-                              <MapPin color={COLORS.forest} size={10} opacity={0.5} /> {getRealOrMockDistance(item)} • {getTimeAgo(item.created_at)}
-                            </Text>
-                          </View>
-                        </View>
-                        <TouchableOpacity style={styles.actionButton} onPress={() => openRequestModal(item)}>
-                          <MessageCircle color={COLORS.oat} size={20} />
-                        </TouchableOpacity>
+                    </View>
+                  ))
+                )}
+              </View>
+            </ScrollView>
+          ) : (
+            <View style={{ flex: 1, marginTop: 10, minHeight: 500 }}>
+              {swipeIndex >= filteredDonations.length ? (
+                <View style={{ flex: 1, backgroundColor: COLORS.white, borderRadius: 30, justifyContent: 'center', alignItems: 'center', padding: 40, borderStyle: 'dashed', borderWidth: 2, borderColor: COLORS.sand, minHeight: 400 }}>
+                  <Inbox color={COLORS.sage} size={48} />
+                  <Text style={{ marginTop: 16, fontSize: 18, fontWeight: 'bold', color: COLORS.forest }}>Tu as tout vu !</Text>
+                  <Text style={{ textAlign: 'center', color: `${COLORS.forest}60`, marginTop: 8 }}>Reviens plus tard pour de nouveaux dons.</Text>
+                  <TouchableOpacity 
+                    onPress={() => { setSwipeIndex(0); setExploreMode('list'); }}
+                    style={{ marginTop: 24, backgroundColor: COLORS.forest, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 20 }}
+                  >
+                    <Text style={{ color: COLORS.white, fontWeight: 'bold' }}>Retour à la liste</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={{ flex: 1, backgroundColor: COLORS.white, borderRadius: 30, shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.1, shadowRadius: 20, elevation: 5, overflow: 'hidden', minHeight: 500 }}>
+                  <Image source={{ uri: filteredDonations[swipeIndex].image }} style={{ width: '100%', height: '60%' }} />
+                  <View style={{ padding: 20, flex: 1 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Text style={{ fontSize: 20, fontWeight: '900', color: COLORS.forest }}>{filteredDonations[swipeIndex].title}</Text>
+                      <View style={{ backgroundColor: `${COLORS.emerald}15`, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 }}>
+                         <Text style={{ color: COLORS.emerald, fontSize: 10, fontWeight: '900' }}>ÉCLAIR</Text>
                       </View>
                     </View>
+                    <Text style={{ fontSize: 14, color: `${COLORS.forest}60`, marginTop: 8, flex: 1 }} numberOfLines={3}>{filteredDonations[swipeIndex].description}</Text>
+                    
+                    <View style={{ flexDirection: 'row', gap: 12, marginTop: 20 }}>
+                      <TouchableOpacity 
+                        onPress={() => setSwipeIndex(prev => prev + 1)}
+                        style={{ flex: 1, backgroundColor: `${COLORS.forest}10`, paddingVertical: 16, borderRadius: 20, alignItems: 'center' }}
+                      >
+                        <Text style={{ fontWeight: '900', color: COLORS.forest }}>Passer</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity 
+                        onPress={() => openRequestModal(filteredDonations[swipeIndex])}
+                        style={{ flex: 1, backgroundColor: COLORS.emerald, paddingVertical: 16, borderRadius: 20, alignItems: 'center', shadowColor: COLORS.emerald, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 }}
+                      >
+                        <Text style={{ fontWeight: '900', color: COLORS.white }}>Sauver</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
-                ))
+                </View>
               )}
             </View>
-          </ScrollView>
+          )
         )}
 
         {activeTab === 'messages' && (
@@ -980,14 +1401,19 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
             {activeChat ? (
               <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={Platform.OS === 'ios' ? 10 : 0}>
                 <View style={styles.chatHeader}>
-                  <TouchableOpacity onPress={() => setActiveChat(null)}>
-                    <X color={COLORS.forest} size={24} />
+                  <TouchableOpacity onPress={() => setActiveChat(null)} style={{ padding: 8 }}>
+                    <ArrowRight color={COLORS.forest} size={24} style={{ transform: [{ rotate: '180deg' }] }} />
                   </TouchableOpacity>
-                  <Text style={styles.chatTitle}>{activeChat.donations?.title}</Text>
-                  <Image 
-                    source={{ uri: (activeChat.requester_id === session.user.id ? activeChat.owner?.avatar_url : activeChat.requester?.avatar_url) || 'https://ui-avatars.com/api/?name=Anonyme' }} 
-                    style={{ width: 32, height: 32, borderRadius: 16 }} 
-                  />
+                  <View style={{ flex: 1, marginLeft: 8 }}>
+                    <Text style={styles.chatTitle} numberOfLines={1}>{activeChat.donations?.title}</Text>
+                    <Text style={{ fontSize: 10, color: COLORS.emerald, fontWeight: 'bold' }}>DEMANDE : {activeChat.requested_portions} PORTION(S)</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => setUserInfoModalVisible(true)} style={{ padding: 4 }}>
+                    <Image 
+                      source={{ uri: (activeChat.requester_id === session.user.id ? activeChat.owner?.avatar_url : activeChat.requester?.avatar_url) || 'https://ui-avatars.com/api/?name=Anonyme' }} 
+                      style={{ width: 36, height: 36, borderRadius: 18, borderWidth: 2, borderColor: COLORS.emerald }} 
+                    />
+                  </TouchableOpacity>
                 </View>
 
                 {activeChat.owner_id === session.user.id && (!activeChat.status || activeChat.status === 'pending') && (
@@ -1029,10 +1455,31 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                 <Text style={styles.title}>Messagerie</Text>
                 <Text style={styles.subtitle}>Vos demandes en cours.</Text>
                 
-                {conversations.length === 0 ? (
+                {/* MESSAGES DONATION FILTER */}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginVertical: 16 }}>
+                  <TouchableOpacity 
+                    onPress={() => setMsgFilter('all')}
+                    style={[styles.filterBtn, msgFilter === 'all' && styles.filterBtnActive]}
+                  >
+                    <Text style={[styles.filterText, msgFilter === 'all' && styles.filterTextActive]}>Tout</Text>
+                  </TouchableOpacity>
+                  {[...new Set(conversations.map(c => c.donations?.title))].filter(Boolean).map((title: any) => (
+                    <TouchableOpacity 
+                      key={title}
+                      onPress={() => setMsgFilter(title)}
+                      style={[styles.filterBtn, msgFilter === title && styles.filterBtnActiveSage]}
+                    >
+                      <Text style={[styles.filterText, msgFilter === title && styles.filterTextActive]}>{title}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+                
+                {conversations.filter(c => msgFilter === 'all' || c.donations?.title === msgFilter).length === 0 ? (
                   <Text style={styles.emptyText}>Aucune conversation.</Text>
                 ) : (
-                  conversations.map((conv) => {
+                  conversations
+                    .filter(c => msgFilter === 'all' || c.donations?.title === msgFilter)
+                    .map((conv) => {
                     const otherUser = conv.requester_id === session.user.id ? conv.owner : conv.requester;
                     
                     let badgeText = 'En attente';
@@ -1064,6 +1511,13 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
             <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
               <Text style={styles.title}>Proposer un don</Text>
               <Text style={styles.subtitle}>Chaque portion compte. Partagez ce que vous ne consommerez pas.</Text>
+
+              <View style={{ backgroundColor: `${COLORS.emerald}10`, padding: 12, borderRadius: 16, marginBottom: 20, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Clock color={COLORS.emerald} size={16} />
+                <Text style={{ fontSize: 11, color: COLORS.emerald, fontWeight: 'bold', flex: 1 }}>
+                  FRAÎCHEUR GARANTIE : Votre annonce sera visible pendant 24H maximum pour garantir la qualité des dons.
+                </Text>
+              </View>
 
               {showSuccess ? (
                 <View style={styles.successBox}>
@@ -1102,7 +1556,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                   />
 
                   <View style={styles.labelRow}>
-                    <Text style={styles.label}>DESCRIPTION</Text>
+                    <Text style={styles.label}>INGRÉDIENTS (Recommandé)</Text>
                     <TouchableOpacity style={styles.magicBtn} onPress={handleEnhanceDescription} disabled={isEnhancingDesc}>
                       {isEnhancingDesc ? <ActivityIndicator color={COLORS.terracotta} size="small" /> : <Sparkles color={COLORS.terracotta} size={14} />}
                       <Text style={styles.magicBtnText}>Magie IA</Text>
@@ -1110,7 +1564,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                   </View>
                   <TextInput
                     style={styles.textArea}
-                    placeholder="Quelques détails (allergènes, contenants...)"
+                    placeholder="Ex: farine, oeufs, lait... (ou précisez les allergènes)"
                     placeholderTextColor={`${COLORS.forest}40`}
                     multiline
                     numberOfLines={4}
@@ -1207,7 +1661,8 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
         )}
 
         {activeTab === 'profile' && (
-          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+          activeSubPage === 'none' ? (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
             <View style={styles.profileHeaderPremium}>
               <View style={styles.avatarContainer}>
                 <Image source={{ uri: profile?.avatar_url ? profile.avatar_url.replace(/ /g, '%20') : 'https://ui-avatars.com/api/?name=Anonyme' }} style={styles.profileAvatarLarge} />
@@ -1216,10 +1671,12 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                 </View>
               </View>
               <Text style={styles.profileNameLarge}>{profile.username}</Text>
-              <View style={styles.locationBadge}>
+              {showGrade && <Text style={{ color: COLORS.emerald, fontWeight: '900', fontSize: 10, marginTop: 4, textTransform: 'uppercase' }}>Héros Lvl. 5</Text>}
+              <TouchableOpacity style={styles.locationBadge} onPress={() => setEditProfileVisible(true)}>
                 <MapPin color={COLORS.forest} size={12} />
                 <Text style={styles.locationBadgeText}>{profile.address || 'France'}</Text>
-              </View>
+                <Edit color={`${COLORS.forest}40`} size={10} style={{ marginLeft: 6 }} />
+              </TouchableOpacity>
             </View>
 
             <View style={styles.statsRow}>
@@ -1229,28 +1686,34 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               </View>
               <View style={styles.dividerStat} />
               <View style={styles.statItem}>
-                <Text style={styles.statValue}>12</Text>
-                <Text style={styles.statLabel}>Sauvés</Text>
+                <Text style={[styles.statValue, { color: COLORS.orange }]}>{karma}</Text>
+                <Text style={styles.statLabel}>Karma</Text>
               </View>
               <View style={styles.dividerStat} />
               <View style={styles.statItem}>
-                <Text style={styles.statValue}>4.8</Text>
-                <Text style={styles.statLabel}>Score</Text>
+                <Text style={styles.statValue}>12</Text>
+                <Text style={styles.statLabel}>Sauvés</Text>
               </View>
             </View>
 
             <View style={styles.menuSection}>
               <Text style={styles.menuSectionTitle}>Paramètres</Text>
               
-              <TouchableOpacity style={styles.menuItemPremium}>
+              <TouchableOpacity style={styles.menuItemPremium} onPress={() => setActiveSubPage('preferences')}>
                 <View style={styles.menuIconBoxPremium}><Settings color={COLORS.forest} size={20} /></View>
                 <Text style={styles.menuTextPremium}>Préférences</Text>
                 <ChevronRight color={`${COLORS.forest}30`} size={20} />
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.menuItemPremium}>
+              <TouchableOpacity style={styles.menuItemPremium} onPress={() => setActiveSubPage('help')}>
                 <View style={styles.menuIconBoxPremium}><Info color={COLORS.forest} size={20} /></View>
                 <Text style={styles.menuTextPremium}>Aide & Support</Text>
+                <ChevronRight color={`${COLORS.forest}30`} size={20} />
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.menuItemPremium} onPress={() => setActiveSubPage('blocked')}>
+                <View style={[styles.menuIconBoxPremium, { backgroundColor: `${COLORS.terracotta}10` }]}><X color={COLORS.terracotta} size={20} /></View>
+                <Text style={styles.menuTextPremium}>Utilisateurs bloqués</Text>
                 <ChevronRight color={`${COLORS.forest}30`} size={20} />
               </TouchableOpacity>
 
@@ -1260,6 +1723,135 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               </TouchableOpacity>
             </View>
           </ScrollView>
+          ) : activeSubPage === 'preferences' ? (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+              <TouchableOpacity onPress={() => setActiveSubPage('none')} style={styles.backBtn}>
+                <ArrowRight color={COLORS.forest} size={20} style={{ transform: [{ rotate: '180deg' }] }} />
+                <Text style={styles.backBtnText}>Retour</Text>
+              </TouchableOpacity>
+              <Text style={styles.title}>Préférences</Text>
+              <Text style={styles.subtitle}>Personnalisez votre expérience Assiette en +.</Text>
+
+              <View style={styles.prefSection}>
+                <Text style={styles.prefSectionTitle}>NOTIFICATIONS</Text>
+                <TouchableOpacity style={styles.prefItem} onPress={() => setNotifDons(!notifDons)}>
+                  <Text style={styles.prefItemText}>Nouveaux dons à proximité</Text>
+                  <View style={notifDons ? styles.toggleOn : styles.toggleOff} />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.prefItem} onPress={() => setNotifMsgs(!notifMsgs)}>
+                  <Text style={styles.prefItemText}>Messages des donateurs</Text>
+                  <View style={notifMsgs ? styles.toggleOn : styles.toggleOff} />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.prefItem} onPress={() => setNotifMissions(!notifMissions)}>
+                  <Text style={styles.prefItemText}>Missions Sauvetage</Text>
+                  <View style={notifMissions ? styles.toggleOn : styles.toggleOff} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={[styles.prefSection, { marginTop: 24 }]}>
+                <Text style={styles.prefSectionTitle}>CONFIDENTIALITÉ</Text>
+                <TouchableOpacity style={styles.prefItem} onPress={() => setShowGrade(!showGrade)}>
+                  <Text style={styles.prefItemText}>Afficher mon grade (Héros)</Text>
+                  <View style={showGrade ? styles.toggleOn : styles.toggleOff} />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.prefItem} onPress={() => setShareExactLocation(!shareExactLocation)}>
+                  <Text style={styles.prefItemText}>Partager ma position précise</Text>
+                  <View style={shareExactLocation ? styles.toggleOn : styles.toggleOff} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={[styles.prefSection, { marginTop: 24 }]}>
+                <Text style={styles.prefSectionTitle}>APPLICATION</Text>
+                <TouchableOpacity style={styles.prefItem}>
+                  <Text style={styles.prefItemText}>Langue</Text>
+                  <Text style={styles.prefValueText}>Français (FR)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.prefItem}>
+                  <Text style={styles.prefItemText}>Mode Sombre</Text>
+                  <Text style={styles.prefValueText}>Désactivé</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          ) : activeSubPage === 'help' ? (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+              <TouchableOpacity onPress={() => setActiveSubPage('none')} style={styles.backBtn}>
+                <ArrowRight color={COLORS.forest} size={20} style={{ transform: [{ rotate: '180deg' }] }} />
+                <Text style={styles.backBtnText}>Retour</Text>
+              </TouchableOpacity>
+              <Text style={styles.title}>Aide & Support</Text>
+              <Text style={styles.subtitle}>Besoin d'un coup de main ? Nous sommes là.</Text>
+
+              <View style={styles.faqList}>
+                <TouchableOpacity style={styles.faqItem}>
+                  <Text style={styles.faqQuestion}>Comment gagner plus de Karma ?</Text>
+                  <ChevronRight color={`${COLORS.forest}30`} size={16} />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.faqItem}>
+                  <Text style={styles.faqQuestion}>Mes données sont-elles sécurisées ?</Text>
+                  <ChevronRight color={`${COLORS.forest}30`} size={16} />
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.faqItem}>
+                  <Text style={styles.faqQuestion}>Un problème lors d'un retrait ?</Text>
+                  <ChevronRight color={`${COLORS.forest}30`} size={16} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.contactCard}>
+                <View style={styles.contactIconBox}>
+                  <Heart color={COLORS.rose} size={24} fill={COLORS.rose} />
+                </View>
+                <Text style={styles.contactTitle}>Contacter l'équipe</Text>
+                <Text style={styles.contactDesc}>Une question ou une suggestion ? Notre équipe de héros vous répond en moins de 24h.</Text>
+                <TouchableOpacity 
+                  style={styles.contactBtn} 
+                  onPress={() => Linking.openURL('mailto:maakni95130@gmail.com?subject=Aide Assiette en +')}
+                >
+                  <Text style={styles.contactBtnText}>Envoyer un message</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.versionText}>Version 1.0.2 Premium Edition</Text>
+            </ScrollView>
+          ) : (
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+              <TouchableOpacity onPress={() => setActiveSubPage('none')} style={styles.backBtn}>
+                <ArrowRight color={COLORS.forest} size={20} style={{ transform: [{ rotate: '180deg' }] }} />
+                <Text style={styles.backBtnText}>Retour</Text>
+              </TouchableOpacity>
+              <Text style={styles.title}>Blocages</Text>
+              <Text style={styles.subtitle}>Gérez les comptes que vous avez bloqués.</Text>
+
+              <View style={[styles.searchBox, { height: 48, marginBottom: 24 }]}>
+                <Search color={COLORS.forest} size={16} opacity={0.5} />
+                <TextInput
+                  style={[styles.searchInput, { fontSize: 14 }]}
+                  placeholder="Rechercher un utilisateur..."
+                  value={blockSearch}
+                  onChangeText={setBlockSearch}
+                />
+              </View>
+
+              {blockedUsers.length === 0 ? (
+                <View style={{ alignItems: 'center', marginTop: 40, opacity: 0.3 }}>
+                  <Check color={COLORS.forest} size={48} />
+                  <Text style={{ marginTop: 12, fontWeight: 'bold' }}>Aucun utilisateur bloqué</Text>
+                </View>
+              ) : (
+                blockedUsers.map((userId) => (
+                  <View key={userId} style={styles.menuItemPremium}>
+                    <View style={styles.menuIconBoxPremium}><UserIcon color={COLORS.forest} size={20} /></View>
+                    <Text style={styles.menuTextPremium}>ID: {userId.substring(0, 8)}...</Text>
+                    <TouchableOpacity 
+                      onPress={() => handleUnblockUser(userId)}
+                      style={{ backgroundColor: `${COLORS.emerald}15`, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 }}
+                    >
+                      <Text style={{ color: COLORS.emerald, fontWeight: 'bold', fontSize: 11 }}>DÉBLOQUER</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))
+              )}
+            </ScrollView>
+          )
         )}
       </View>
 
@@ -1326,11 +1918,155 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
         </View>
       </Modal>
 
+      {/* DONATION DETAILS MODAL */}
+      <Modal visible={detailsModalVisible} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContentLarge}>
+            <TouchableOpacity onPress={() => setDetailsModalVisible(false)} style={styles.modalCloseBtn}>
+              <X color={COLORS.forest} size={24} />
+            </TouchableOpacity>
+
+            {viewingDonation && (
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <Image source={{ uri: viewingDonation.image }} style={{ width: '100%', height: 250, borderRadius: 24, marginBottom: 24 }} />
+                
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text style={{ fontSize: 24, fontWeight: '900', color: COLORS.forest, flex: 1 }}>{viewingDonation.title}</Text>
+                  <View style={{ backgroundColor: `${COLORS.emerald}15`, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 }}>
+                    <Text style={{ color: COLORS.emerald, fontWeight: 'bold', fontSize: 12 }}>{viewingDonation.portions} PORTIONS</Text>
+                  </View>
+                </View>
+
+                <View style={{ flexDirection: 'row', gap: 12, marginVertical: 16 }}>
+                   <View style={{ backgroundColor: `${COLORS.terracotta}10`, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <Clock color={COLORS.terracotta} size={14} />
+                      <Text style={{ color: COLORS.terracotta, fontWeight: 'bold', fontSize: 11 }}>IRESTE : {getTimeRemaining(viewingDonation.expires_at)}</Text>
+                   </View>
+                   <View style={{ backgroundColor: `${COLORS.forest}05`, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                      <MapPin color={COLORS.forest} size={14} />
+                      <Text style={{ color: COLORS.forest, fontWeight: 'bold', fontSize: 11 }}>{getRealOrMockDistance(viewingDonation)}</Text>
+                   </View>
+                </View>
+
+                <Text style={{ fontSize: 16, color: `${COLORS.forest}80`, lineHeight: 24, marginBottom: 32 }}>
+                  {viewingDonation.description}
+                </Text>
+
+                <View style={{ backgroundColor: `${COLORS.sand}40`, padding: 20, borderRadius: 24, marginBottom: 32 }}>
+                   <Text style={{ fontWeight: 'bold', color: COLORS.forest, marginBottom: 12 }}>INFOS COMPLÉMENTAIRES</Text>
+                   <View style={{ gap: 8 }}>
+                      <Text style={{ fontSize: 13, color: `${COLORS.forest}60` }}>📍 Adresse : {viewingDonation.address || 'Près de chez vous'}</Text>
+                      <Text style={{ fontSize: 13, color: `${COLORS.forest}60` }}>⏳ Publié : {getTimeAgo(viewingDonation.created_at)}</Text>
+                      <Text style={{ fontSize: 13, color: `${COLORS.forest}60` }}>🍎 Type : {viewingDonation.type === 'plat' ? 'Plat cuisiné maison' : 'Surplus alimentaire'}</Text>
+                   </View>
+                </View>
+
+                <TouchableOpacity 
+                  style={[styles.submitBtn, { marginBottom: 40 }]} 
+                  onPress={() => {
+                    setDetailsModalVisible(false);
+                    openRequestModal(viewingDonation);
+                  }}
+                >
+                  <Text style={styles.submitBtnText}>Contacter le donateur</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* USER INFO MODAL */}
+      <Modal visible={userInfoModalVisible} animationType="fade" transparent>
+        <TouchableOpacity 
+          style={styles.modalOverlay} 
+          activeOpacity={1} 
+          onPress={() => setUserInfoModalVisible(false)}
+        >
+          <View style={[styles.modalContent, { paddingBottom: 32 }]}>
+            <View style={{ alignItems: 'center', marginBottom: 24 }}>
+              <Image 
+                source={{ uri: (activeChat?.requester_id === session.user.id ? activeChat?.owner?.avatar_url : activeChat?.requester?.avatar_url) || 'https://ui-avatars.com/api/?name=Anonyme' }} 
+                style={{ width: 80, height: 80, borderRadius: 40, marginBottom: 12 }} 
+              />
+              <Text style={{ fontSize: 20, fontWeight: '900', color: COLORS.forest }}>
+                {activeChat?.requester_id === session.user.id ? activeChat?.owner?.username : activeChat?.requester?.username}
+              </Text>
+            </View>
+
+            <View style={{ backgroundColor: `${COLORS.sand}50`, padding: 16, borderRadius: 20, marginBottom: 32 }}>
+               <Text style={{ textAlign: 'center', fontSize: 12, fontWeight: 'bold', color: `${COLORS.forest}60`, marginBottom: 8 }}>VOS ÉCHANGES</Text>
+               <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 24 }}>
+                 <View style={{ alignItems: 'center' }}>
+                   <Text style={{ fontSize: 18, fontWeight: '900', color: COLORS.emerald }}>{targetUserStats.received}</Text>
+                   <Text style={{ fontSize: 10, color: `${COLORS.forest}40` }}>Reçus</Text>
+                 </View>
+                 <View style={{ width: 1, height: 30, backgroundColor: `${COLORS.forest}10` }} />
+                 <View style={{ alignItems: 'center' }}>
+                   <Text style={{ fontSize: 18, fontWeight: '900', color: COLORS.orange }}>{targetUserStats.given}</Text>
+                   <Text style={{ fontSize: 10, color: `${COLORS.forest}40` }}>Donnés</Text>
+                 </View>
+               </View>
+            </View>
+
+            <TouchableOpacity 
+              style={[styles.menuItemPremium, { borderBottomWidth: 0, backgroundColor: `${COLORS.terracotta}05` }]}
+              onPress={() => handleBlockUser(activeChat?.requester_id === session.user.id ? activeChat?.owner_id : activeChat?.requester_id)}
+            >
+              <View style={[styles.menuIconBoxPremium, { backgroundColor: `${COLORS.terracotta}10` }]}><X color={COLORS.terracotta} size={20} /></View>
+              <Text style={[styles.menuTextPremium, { color: COLORS.terracotta }]}>Bloquer ce compte</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={[styles.menuItemPremium, { borderBottomWidth: 0, marginTop: 8 }]}
+              onPress={() => handleDeleteConversation(activeChat?.id)}
+            >
+              <View style={[styles.menuIconBoxPremium, { backgroundColor: `${COLORS.forest}05` }]}><Trash2 color={COLORS.forest} size={20} /></View>
+              <Text style={styles.menuTextPremium}>Supprimer la conversation</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
+
+      {/* EDIT PROFILE MODAL */}
+      <Modal visible={editProfileVisible} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Modifier mon profil</Text>
+              <TouchableOpacity onPress={() => setEditProfileVisible(false)}>
+                <X color={COLORS.forest} size={24} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView showsVerticalScrollIndicator={false}>
+              <Text style={styles.label}>VOTRE NOM / PSEUDO</Text>
+              <TextInput
+                style={styles.input}
+                value={editedUsername}
+                onChangeText={setEditedUsername}
+              />
+
+              <Text style={[styles.label, { marginTop: 24 }]}>ADRESSE PAR DÉFAUT</Text>
+              <TextInput
+                style={styles.input}
+                value={editedAddress}
+                onChangeText={setEditedAddress}
+              />
+
+              <TouchableOpacity style={[styles.submitBtn, { marginTop: 40 }]} onPress={handleUpdateProfile} disabled={isPublishing}>
+                {isPublishing ? <ActivityIndicator color={COLORS.oat} /> : <Text style={styles.submitBtnText}>Enregistrer les modifications</Text>}
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
       {/* BOTTOM NAV */}
       {!activeChat && (
         <View style={styles.navContainer}>
           <View style={styles.navBar}>
-            <TouchableOpacity style={styles.navItem} onPress={() => { setActiveTab('explore'); setActiveChat(null); }}>
+            <TouchableOpacity style={styles.navItem} onPress={() => { setActiveTab('explore'); setActiveChat(null); setActiveSubPage('none'); }}>
               <Home color={COLORS.oat} size={24} opacity={activeTab === 'explore' ? 1 : 0.5} />
               <Text style={[styles.navText, { opacity: activeTab === 'explore' ? 1 : 0.5 }]}>Explorer</Text>
             </TouchableOpacity>
@@ -1341,9 +2077,20 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               </View>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.navItem} onPress={() => setActiveTab('messages')}>
-              <MessageCircle color={COLORS.oat} size={24} opacity={activeTab === 'messages' ? 1 : 0.5} />
+            <TouchableOpacity 
+              style={styles.navItem} 
+              onPress={() => { 
+                setActiveTab('messages'); 
+                setActiveChat(null); 
+                setActiveSubPage('none'); 
+                setHasNewNotification(false);
+              }}
+            >
+              <Animated.View style={{ opacity: hasNewNotification ? blinkAnim : 1 }}>
+                <MessageCircle color={COLORS.oat} size={24} opacity={activeTab === 'messages' ? 1 : 0.5} />
+              </Animated.View>
               <Text style={[styles.navText, { opacity: activeTab === 'messages' ? 1 : 0.5 }]}>Messages</Text>
+              {hasNewNotification && <View style={styles.notifDot} />}
             </TouchableOpacity>
           </View>
         </View>
@@ -1983,6 +2730,30 @@ const styles = StyleSheet.create({
     shadowRadius: 10,
     elevation: 2,
   },
+  navPlus: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: COLORS.emerald,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: COLORS.emerald,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  notifDot: {
+    position: 'absolute',
+    top: 0,
+    right: 25,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.terracotta,
+    borderWidth: 2,
+    borderColor: COLORS.forest,
+  },
   manageCardImage: {
     width: 80,
     height: 80,
@@ -2052,16 +2823,13 @@ const styles = StyleSheet.create({
     borderColor: COLORS.oat,
   },
   profileNameLarge: {
-    fontSize: 26,
+    fontSize: 24,
     fontWeight: 'bold',
     color: COLORS.forest,
   },
   locationBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: `${COLORS.forest}10`,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
     borderRadius: 12,
     marginTop: 8,
     gap: 4,
@@ -2227,5 +2995,135 @@ const styles = StyleSheet.create({
     color: COLORS.forest,
     fontSize: 14,
     fontWeight: '600',
+  },
+  backBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+    gap: 8,
+  },
+  backBtnText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.forest,
+  },
+  prefSection: {
+    backgroundColor: COLORS.white,
+    borderRadius: 24,
+    padding: 20,
+  },
+  prefSectionTitle: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: `${COLORS.forest}30`,
+    letterSpacing: 1.5,
+    marginBottom: 16,
+  },
+  prefItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: `${COLORS.sand}50`,
+  },
+  prefItemText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.forest,
+  },
+  prefValueText: {
+    fontSize: 14,
+    color: COLORS.emerald,
+    fontWeight: '900',
+  },
+  toggleOn: {
+    width: 40,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.emerald,
+    borderWidth: 2,
+    borderColor: COLORS.emerald,
+    alignItems: 'flex-end',
+    padding: 2,
+  },
+  toggleOff: {
+    width: 40,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: `${COLORS.forest}10`,
+    borderWidth: 2,
+    borderColor: `${COLORS.forest}10`,
+    alignItems: 'flex-start',
+    padding: 2,
+  },
+  faqList: {
+    backgroundColor: COLORS.white,
+    borderRadius: 24,
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+  },
+  faqItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: `${COLORS.sand}50`,
+  },
+  faqQuestion: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.forest,
+    flex: 1,
+  },
+  contactCard: {
+    backgroundColor: `${COLORS.rose}10`,
+    borderRadius: 30,
+    padding: 24,
+    marginTop: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: `${COLORS.rose}20`,
+  },
+  contactIconBox: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: COLORS.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
+  },
+  contactTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: COLORS.forest,
+    marginBottom: 8,
+  },
+  contactDesc: {
+    fontSize: 13,
+    color: `${COLORS.forest}60`,
+    textAlign: 'center',
+    lineHeight: 18,
+    marginBottom: 20,
+  },
+  contactBtn: {
+    backgroundColor: COLORS.rose,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 20,
+  },
+  contactBtnText: {
+    color: COLORS.white,
+    fontWeight: 'bold',
+    fontSize: 14,
+  },
+  versionText: {
+    textAlign: 'center',
+    fontSize: 12,
+    color: `${COLORS.forest}20`,
+    marginTop: 32,
+    fontWeight: '700',
   }
 });
