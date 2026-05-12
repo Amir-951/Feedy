@@ -1,4 +1,5 @@
 import React from 'react';
+import { Analytics } from "@vercel/analytics/react"
 import Simulator from './Simulator';
 import { motion } from 'framer-motion';
 import { 
@@ -229,6 +230,7 @@ export default function App() {
           </div>
         </div>
       </footer>
+      <Analytics />
     </div>
   );
 }
