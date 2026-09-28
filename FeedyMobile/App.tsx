@@ -11,16 +11,17 @@ import {
   Image,
   KeyboardAvoidingView,
   Platform,
+  PermissionsAndroid,
   ActivityIndicator,
   LogBox,
   Modal,
   Linking,
   Animated,
 } from 'react-native';
-import { 
-  Home, Search, Plus, User as UserIcon, LogOut, MapPin, Sparkles, X, Heart, 
-  MessageCircle, ChevronRight, Send, Camera, Info, Check, Clock, 
-  UtensilsCrossed, Leaf, List, Trash2, Edit, Settings, Flame, Zap, ArrowRight, Inbox, Package 
+import {
+  Home, Search, Plus, User as UserIcon, LogOut, MapPin, Navigation, X, Heart,
+  MessageCircle, ChevronRight, Send, Camera, Info, Check, Clock,
+  UtensilsCrossed, Leaf, List, Trash2, Edit, Settings, Flame, Zap, ArrowRight, Inbox, Package
 } from 'lucide-react-native';
 import * as ImagePicker from 'react-native-image-picker';
 import { launchImageLibrary } from 'react-native-image-picker';
@@ -30,7 +31,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, Session } from '@supabase/supabase-js';
 
 // @ts-ignore
-import { GEMINI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY } from '@env';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from '@env';
 
 LogBox.ignoreLogs(['AuthApiError: Invalid Refresh Token: Refresh Token Not Found']);
 
@@ -55,7 +56,9 @@ const cleanupExpiredDonations = async () => {
       .from('donations')
       .delete()
       .lt('expires_at', now);
-  } catch (e) {}
+  } catch (e: any) {
+    console.warn('App: Expired donations cleanup error:', e.message || e);
+  }
 };
 
 // --- THEME ---
@@ -71,24 +74,146 @@ const COLORS = {
   rose: '#F43F5E',
 };
 
-// --- GEMINI HELPER ---
-const callGemini = async (prompt: string) => {
-  if (!GEMINI_API_KEY) return "API Key manquante.";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-  const payload = { contents: [{ parts: [{ text: prompt }] }] };
+type Coordinates = {
+  lat: number;
+  lng: number;
+};
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error('API Error');
-    const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || 'Erreur.';
-  } catch (err) {
-    return "Impossible de joindre l'IA.";
+type GeocodedAddress = Coordinates & {
+  label: string;
+  city: string;
+};
+
+const LOCATION_OPTIONS = {
+  enableHighAccuracy: true,
+  timeout: 20000,
+  maximumAge: 10000,
+};
+
+const NOMINATIM_HEADERS = {
+  'User-Agent': 'AssietteEnPlus/1.0 (FeedyMobile)',
+  'Accept-Language': 'fr',
+};
+
+const toFiniteNumber = (value: any) => {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const parsePortions = (value: any) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+};
+
+const getDonationCoordinates = (item: any): Coordinates | null => {
+  const lat = toFiniteNumber(item?.latitude);
+  const lng = toFiniteNumber(item?.longitude);
+  return lat === null || lng === null ? null : { lat, lng };
+};
+
+const calculateDistanceRaw = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+const formatDistanceFromKm = (distanceKm: number) =>
+  distanceKm < 1 ? `${Math.round(distanceKm * 1000)}m` : `${distanceKm.toFixed(1)}km`;
+
+const formatDistance = (from: Coordinates, to: Coordinates) =>
+  formatDistanceFromKm(calculateDistanceRaw(from.lat, from.lng, to.lat, to.lng));
+
+const requestCurrentLocation = async (): Promise<Coordinates> => {
+  if (Platform.OS === 'android') {
+    const permission = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+      {
+        title: 'Autoriser la position',
+        message: 'Feedy utilise votre position pour calculer les distances des dons proches.',
+        buttonPositive: 'Autoriser',
+        buttonNegative: 'Refuser',
+      },
+    );
+
+    if (permission !== PermissionsAndroid.RESULTS.GRANTED) {
+      throw new Error('Permission GPS refusée.');
+    }
+  } else {
+    Geolocation.requestAuthorization(
+      () => undefined,
+      () => undefined,
+    );
   }
+
+  return new Promise((resolve, reject) => {
+    Geolocation.getCurrentPosition(
+      (position) =>
+        resolve({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+        }),
+      (error) => reject(new Error(error.message || 'Position GPS indisponible.')),
+      LOCATION_OPTIONS,
+    );
+  });
+};
+
+const geocodeAddress = async (address: string): Promise<GeocodedAddress | null> => {
+  const query = address.trim();
+  if (!query) return null;
+
+  const response = await fetch(
+    `https://nominatim.openstreetmap.org/search?format=json&limit=1&addressdetails=1&q=${encodeURIComponent(query)}`,
+    { headers: NOMINATIM_HEADERS },
+  );
+
+  if (!response.ok) {
+    throw new Error('Service de géocodage indisponible.');
+  }
+
+  const results = await response.json();
+  const first = Array.isArray(results) ? results[0] : null;
+  const lat = toFiniteNumber(first?.lat);
+  const lng = toFiniteNumber(first?.lon);
+
+  if (lat === null || lng === null) {
+    return null;
+  }
+
+  const addr = first?.address || {};
+
+  return {
+    lat,
+    lng,
+    label: first?.display_name || query,
+    city: addr.city || addr.town || addr.village || '',
+  };
+};
+
+const reverseGeocode = async ({ lat, lng }: Coordinates) => {
+  const response = await fetch(
+    `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`,
+    { headers: NOMINATIM_HEADERS },
+  );
+
+  if (!response.ok) {
+    throw new Error('Adresse GPS indisponible.');
+  }
+
+  const data = await response.json();
+  const addr = data.address || {};
+  const street = addr.road || addr.pedestrian || addr.suburb || '';
+  const city = addr.city || addr.town || addr.village || '';
+  return `${street}${street && city ? ', ' : ''}${city}` || 'Position détectée';
 };
 
 export default function App() {
@@ -125,11 +250,11 @@ export default function App() {
     console.log('App: Fetching profile for', userId);
     setLoadingProfile(true);
     try {
-      const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).single();
+      const { data, error } = await supabase.rpc('get_my_profile').single();
       if (error) {
         console.warn('App: Profile fetch error:', error.message);
         setProfile(null);
-      } else if (data) {
+      } else if (data && (data as any).id) {
         console.log('App: Profile loaded successfully');
         setProfile(data);
       } else {
@@ -370,6 +495,11 @@ function ProfileSetupScreen({ session, onProfileCreated }: { session: Session, o
 function MainScreen({ session, profile, onLogout }: { session: Session, profile: any, onLogout: () => void }) {
   const [activeTab, setActiveTab] = useState('explore');
   const [donations, setDonations] = useState<any[]>([]);
+  const [myDonations, setMyDonations] = useState<any[]>([]);
+  const [donationsPage, setDonationsPage] = useState(0);
+  const [hasMoreDonations, setHasMoreDonations] = useState(true);
+  const [isLoadingMoreDonations, setIsLoadingMoreDonations] = useState(false);
+  const DONATIONS_PAGE_SIZE = 15;
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [userLocation, setUserLocation] = useState<{lat: number, lng: number} | null>(null);
@@ -380,21 +510,18 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
   const [newDesc, setNewDesc] = useState('');
   const [newPortions, setNewPortions] = useState('');
   const [newAddress, setNewAddress] = useState(profile.address); // Pre-fill with profile address
+  const [isLocatingAddress, setIsLocatingAddress] = useState(false);
+  const [newExpiresAt, setNewExpiresAt] = useState<Date>(() => new Date(Date.now() + 24 * 60 * 60 * 1000));
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [isPublishing, setIsPublishing] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
 
-  // AI States
-  const [isEnhancingDesc, setIsEnhancingDesc] = useState(false);
-  const [recipeLoadingId, setRecipeLoadingId] = useState<string | null>(null);
-  const [generatedRecipes, setGeneratedRecipes] = useState<{ [key: string]: string }>({});
-  
   const [userInfoModalVisible, setUserInfoModalVisible] = useState(false);
   
   // Advanced Filter States
   const [isHalalFilter, setIsHalalFilter] = useState(false);
-  const [sortBy, setSortBy] = useState<'time' | 'distance'>('time');
+  const [sortBy, setSortBy] = useState<'time' | 'distance'>('distance');
   const [isNewHalal, setIsNewHalal] = useState(false);
   
   // Toast
@@ -461,26 +588,64 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     return `${hours}h ${minutes}m`;
   };
 
-  const fetchDonations = async () => {
+  const fetchDonations = async (page = 0) => {
+    if (page === 0) {
+      setDonationsPage(0);
+      setHasMoreDonations(true);
+    } else {
+      setIsLoadingMoreDonations(true);
+    }
+
+    const { data, error } = await supabase.rpc('get_donations_nearby', {
+      user_lat: userLocation?.lat ?? null,
+      user_lng: userLocation?.lng ?? null,
+      page_size: DONATIONS_PAGE_SIZE,
+      page_offset: page * DONATIONS_PAGE_SIZE,
+    });
+
+    if (error) {
+      console.warn('App: Donations fetch error:', error.message);
+      showToast('Impossible de charger les annonces');
+      setIsLoadingMoreDonations(false);
+      return;
+    }
+
+    if (data) {
+      setDonations((prev) => (page === 0 ? data : [...prev, ...data]));
+      setDonationsPage(page);
+      setHasMoreDonations(data.length === DONATIONS_PAGE_SIZE);
+      if (page === 0) {
+        // Logic for Mission Sauvetage: Find a donation with many portions or very recent
+        const urgent = data.find((d: any) => (parsePortions(d.portions) || 0) > 5) || data[0];
+        setUrgentMission(urgent);
+      }
+    }
+    setIsLoadingMoreDonations(false);
+  };
+
+  const loadMoreDonations = () => {
+    if (isLoadingMoreDonations || !hasMoreDonations) return;
+    fetchDonations(donationsPage + 1);
+  };
+
+  const fetchMyDonations = async () => {
     const { data, error } = await supabase
       .from('donations')
-      .select(`
-        *,
-        profiles:user_id (username, avatar_url)
-      `)
+      .select('id, title, type, description, portions, image, user_id, created_at, latitude, longitude, is_halal, city, expires_at')
+      .eq('user_id', session.user.id)
       .order('created_at', { ascending: false });
-      
-    if (data) {
-      setDonations(data);
-      // Logic for Mission Sauvetage: Find a donation with many portions or very recent
-      const urgent = data.find(d => parseInt(d.portions) > 5) || data[0];
-      setUrgentMission(urgent);
+
+    if (error) {
+      console.warn('App: My donations fetch error:', error.message);
+      return;
     }
+    if (data) setMyDonations(data);
   };
 
   useEffect(() => {
     console.log('App: Main effect running');
-    fetchDonations();
+    fetchDonations(0);
+    fetchMyDonations();
     cleanupExpiredDonations();
 
     // Supabase Realtime Subscription (Donations)
@@ -489,7 +654,10 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     try {
       subDonations = supabase
         .channel('donations_channel')
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'donations' }, fetchDonations)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'donations' }, () => {
+          fetchDonations(0);
+          fetchMyDonations();
+        })
         .subscribe();
 
       subMessages = supabase
@@ -505,32 +673,30 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       console.warn('App: Realtime subscription failed', err);
     }
 
-    // Fetch user location
-    console.log('App: Requesting geolocation');
-    try {
-      Geolocation.requestAuthorization();
-      Geolocation.getCurrentPosition(
-        (position) => {
-          console.log('App: Location received');
-          setUserLocation({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude,
-          });
-        },
-        (error) => console.log('App: Location error:', error.message),
-        { enableHighAccuracy: true, timeout: 20000, maximumAge: 10000 }
-      );
-    } catch (err) {
-      console.warn('App: Geolocation crash prevented', err);
-    }
+    requestCurrentLocation()
+      .then((coords) => {
+        console.log('App: Location received');
+        setUserLocation(coords);
+      })
+      .catch((err) => {
+        console.warn('App: Location unavailable:', err.message);
+      });
 
     return () => {
       try {
         if (subDonations) supabase.removeChannel(subDonations);
         if (subMessages) supabase.removeChannel(subMessages);
-      } catch (e) {}
+      } catch (e: any) {
+        console.warn('App: Realtime cleanup error:', e.message || e);
+      }
     };
   }, []);
+
+  // Re-trie le fil du plus proche au plus loin des que la position
+  // GPS reelle est disponible (au demarrage, elle vaut encore null).
+  useEffect(() => {
+    if (userLocation) fetchDonations(0);
+  }, [userLocation]);
 
   // --- PERSISTENCE & PREFERENCES LOGIC ---
   useEffect(() => {
@@ -545,7 +711,9 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
           if (p.showGrade !== undefined) setShowGrade(p.showGrade);
           if (p.shareExactLocation !== undefined) setShareExactLocation(p.shareExactLocation);
         }
-      } catch (e) {}
+      } catch (e: any) {
+        console.warn('App: Preferences load error:', e.message || e);
+      }
     };
     loadPrefs();
   }, []);
@@ -555,7 +723,9 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       try {
         const prefs = { notifDons, notifMsgs, notifMissions, showGrade, shareExactLocation };
         await AsyncStorage.setItem('user_prefs', JSON.stringify(prefs));
-      } catch (e) {}
+      } catch (e: any) {
+        console.warn('App: Preferences save error:', e.message || e);
+      }
     };
     savePrefs();
   }, [notifDons, notifMsgs, notifMissions, showGrade, shareExactLocation]);
@@ -565,12 +735,18 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       .from('conversations')
       .select(`
         *,
-        donations:donation_id(title, image),
+        donations:donation_id(title, image, portions),
         requester:requester_id(username, avatar_url),
         owner:owner_id(username, avatar_url)
       `)
       .or(`requester_id.eq.${session.user.id},owner_id.eq.${session.user.id}`)
       .order('created_at', { ascending: false });
+
+    if (error) {
+      console.warn('App: Conversations fetch error:', error.message);
+      showToast('Impossible de charger les messages');
+      return;
+    }
 
     if (data) setConversations(data);
   };
@@ -582,7 +758,12 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       .select('*')
       .eq('conversation_id', conversation.id)
       .order('created_at', { ascending: true });
-    
+    if (error) {
+      console.warn('App: Chat fetch error:', error.message);
+      showToast('Impossible de charger la conversation');
+      return;
+    }
+
     if (data) setChatMessages(data);
 
     // Calculate reciprocity stats
@@ -602,6 +783,12 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
   }, [activeTab]);
 
   const openRequestModal = (item: any) => {
+    const availablePortions = parsePortions(item.portions);
+    if (availablePortions !== null && availablePortions <= 0) {
+      showToast('Ce don n’a plus de portions disponibles');
+      return;
+    }
+
     setSelectedDonation(item);
     setRequestMsg(`Bonjour, je suis intéressé par ${item.title} !`);
     setRequestedPortions('1');
@@ -610,6 +797,19 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
 
   const handleSendRequest = async () => {
     if (!requestMsg.trim() || !selectedDonation) return;
+    const requested = parsePortions(requestedPortions);
+    const availablePortions = parsePortions(selectedDonation.portions);
+
+    if (!requested) {
+      showToast('Choisissez au moins 1 portion');
+      return;
+    }
+
+    if (availablePortions !== null && requested > availablePortions) {
+      showToast(`Stock insuffisant : ${availablePortions} portion(s) disponible(s)`);
+      return;
+    }
+
     setIsPublishing(true);
     
     try {
@@ -630,7 +830,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
             donation_id: selectedDonation.id,
             requester_id: session.user.id,
             owner_id: selectedDonation.user_id,
-            requested_portions: parseInt(requestedPortions),
+            requested_portions: requested,
           })
           .select().single();
         if (convErr) throw convErr;
@@ -650,7 +850,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       setRequestModalVisible(false);
       fetchConversations();
     } catch(e: any) {
-      console.log(e);
+      console.warn('App: Request send error:', e.message || e);
       showToast("Erreur lors de l'envoi");
     }
     setIsPublishing(false);
@@ -669,35 +869,57 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       if (!error) {
         setChatInput('');
         loadChat(activeChat); // Reload messages
+      } else {
+        console.warn('App: Message send error:', error.message);
+        showToast("Erreur lors de l'envoi du message");
       }
-    } catch(e) {}
+    } catch(e: any) {
+      console.warn('App: Message send crash:', e.message || e);
+      showToast("Erreur lors de l'envoi du message");
+    }
   };
 
   const handleUpdateStatus = async (status: string) => {
     if (!activeChat) return;
     try {
+      if (status === 'accepted') {
+        // Acceptation + decompte des portions faits atomiquement cote
+        // base (verrou de ligne), pour eviter que deux demandes
+        // acceptees en meme temps ne survendent le stock disponible.
+        const { data, error } = await supabase.rpc('accept_donation_request', {
+          p_conversation_id: activeChat.id,
+        });
+        if (error) throw error;
+
+        const result = data as any;
+        if (!result?.success) {
+          showToast(result?.message || 'Impossible d\'accepter la demande');
+          return;
+        }
+
+        setActiveChat({ ...activeChat, status });
+        fetchConversations();
+        fetchDonations();
+        showToast('Demande acceptée ! Portions mises à jour.');
+        return;
+      }
+
       const { error } = await supabase
         .from('conversations')
         .update({ status })
         .eq('id', activeChat.id);
       if (!error) {
-        // AUTOMATIC PORTION DEDUCTION
-        if (status === 'accepted' && activeChat.requested_portions && activeChat.donations) {
-          const currentTotal = parseInt(activeChat.donations.portions) || 0;
-          const requested = activeChat.requested_portions;
-          const newTotal = Math.max(0, currentTotal - requested);
-          
-          await supabase
-            .from('donations')
-            .update({ portions: newTotal.toString() })
-            .eq('id', activeChat.donation_id);
-        }
-
         setActiveChat({ ...activeChat, status });
         fetchConversations();
-        showToast(status === 'accepted' ? 'Demande acceptée ! Portions mises à jour.' : 'Demande refusée');
+        showToast('Demande refusée');
+      } else {
+        console.warn('App: Conversation status error:', error.message);
+        showToast('Impossible de mettre à jour la demande');
       }
-    } catch(e) {}
+    } catch(e: any) {
+      console.warn('App: Conversation status crash:', e.message || e);
+      showToast('Impossible de mettre à jour la demande');
+    }
   };
 
   const handleDeleteConversation = async (convId: string) => {
@@ -711,8 +933,14 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
         setActiveChat(null);
         fetchConversations();
         setUserInfoModalVisible(false);
+      } else {
+        console.warn('App: Conversation delete error:', error.message);
+        showToast('Impossible de supprimer la conversation');
       }
-    } catch(e) {}
+    } catch(e: any) {
+      console.warn('App: Conversation delete crash:', e.message || e);
+      showToast('Impossible de supprimer la conversation');
+    }
   };
 
   const handleBlockUser = (userId: string) => {
@@ -728,6 +956,8 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     showToast("Utilisateur débloqué");
   };
 
+  const isExploreMode = (mode: 'list' | 'swipe') => exploreMode === mode;
+
   const filteredDonations = donations.filter((item) => {
     if (blockedUsers.includes(item.user_id)) return false; // Hide blocked users
     const matchFilter = filter === 'all' || item.type === filter;
@@ -738,9 +968,16 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     return matchFilter && matchHalal && matchSearch;
   }).sort((a, b) => {
     if (sortBy === 'distance' && userLocation) {
-      const distA = a.latitude && a.longitude ? calculateDistanceRaw(userLocation.lat, userLocation.lng, a.latitude, a.longitude) : 9999;
-      const distB = b.latitude && b.longitude ? calculateDistanceRaw(userLocation.lat, userLocation.lng, b.latitude, b.longitude) : 9999;
-      return distA - distB;
+      const coordsA = getDonationCoordinates(a);
+      const coordsB = getDonationCoordinates(b);
+      if (coordsA && coordsB) {
+        return (
+          calculateDistanceRaw(userLocation.lat, userLocation.lng, coordsA.lat, coordsA.lng) -
+          calculateDistanceRaw(userLocation.lat, userLocation.lng, coordsB.lat, coordsB.lng)
+        );
+      }
+      if (coordsA) return -1;
+      if (coordsB) return 1;
     }
     return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
   });
@@ -759,35 +996,15 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     return `Il y a ${diffInDays} j`;
   };
 
-  const getMockDistance = (id: string) => {
-    const num = id.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-    const distances = ['300m', '800m', '1.2km', '2.5km', '500m', '4.1km', '150m'];
-    return distances[num % distances.length];
-  };
-
-  const calculateDistanceRaw = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-    const R = 6371;
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = 
-      Math.sin(dLat/2) * Math.sin(dLat/2) +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
-      Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    return R * c;
-  };
-
-  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
-    const d = calculateDistanceRaw(lat1, lon1, lat2, lon2);
-    return d < 1 ? `${Math.round(d * 1000)}m` : `${d.toFixed(1)}km`;
-  };
-
-  const getRealOrMockDistance = (item: any) => {
+  const getDonationDistanceLabel = (item: any) => {
     if (!shareExactLocation) return 'À proximité';
-    if (userLocation && item.latitude && item.longitude) {
-      return calculateDistance(userLocation.lat, userLocation.lng, item.latitude, item.longitude);
-    }
-    return getMockDistance(item.id);
+    if (!userLocation) return 'Position GPS indisponible';
+
+    const donationCoordinates = getDonationCoordinates(item);
+    if (!donationCoordinates) return 'Distance indisponible';
+
+    const distanceLabel = formatDistance(userLocation, donationCoordinates);
+    return item.city ? `${item.city} · ${distanceLabel}` : distanceLabel;
   };
 
   const showToast = (msg: string) => {
@@ -795,36 +1012,21 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     setTimeout(() => setToastMsg(''), 3000);
   };
 
-  const refreshLocation = () => {
+  const refreshLocation = async () => {
     showToast('Mise à jour de votre position...');
-    Geolocation.getCurrentPosition(
-      (position) => {
-        setUserLocation({
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-        });
-        
-        // Reverse Geocoding via OpenStreetMap (Nominatim)
-        fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${position.coords.latitude}&lon=${position.coords.longitude}&zoom=18&addressdetails=1`, {
-          headers: { 'User-Agent': 'AssietteEnPlus' }
-        })
-          .then(res => res.json())
-          .then(data => {
-            const addr = data.address;
-            const street = addr.road || addr.pedestrian || addr.suburb || '';
-            const city = addr.city || addr.town || addr.village || '';
-            setCurrentAddressName(`${street}${street && city ? ', ' : ''}${city}` || 'Position détectée');
-          })
-          .catch(() => setCurrentAddressName('Position détectée'));
-
-        setUsingGPS(true);
-        setSortBy('distance');
-        showToast('Position mise à jour !');
-        fetchDonations();
-      },
-      (error) => showToast('Erreur GPS'),
-      { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
-    );
+    try {
+      const coords = await requestCurrentLocation();
+      setUserLocation(coords);
+      setCurrentAddressName(await reverseGeocode(coords));
+      setUsingGPS(true);
+      setSortBy('distance');
+      showToast('Position mise à jour !');
+      fetchDonations();
+    } catch (e: any) {
+      console.warn('App: Location refresh error:', e.message || e);
+      setUsingGPS(false);
+      showToast(e.message || 'Erreur GPS');
+    }
   };
 
   const handleDeleteDonation = async (id: string) => {
@@ -836,41 +1038,85 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       if (!error) {
         showToast('Publication supprimée');
         fetchDonations();
+        fetchMyDonations();
+      } else {
+        console.warn('App: Donation delete error:', error.message);
+        showToast('Impossible de supprimer la publication');
       }
-    } catch(e) {}
+    } catch(e: any) {
+      console.warn('App: Donation delete crash:', e.message || e);
+      showToast('Impossible de supprimer la publication');
+    }
   };
 
-  const openEditModal = (item: any) => {
+  const openDonationDetails = async (item: any) => {
+    setViewingDonation(item);
+    setDetailsModalVisible(true);
+
+    const { data: address } = await supabase.rpc('get_donation_address', { donation_id: item.id });
+    if (address) setViewingDonation({ ...item, address });
+  };
+
+  const openEditModal = async (item: any) => {
     setEditingDonation(item);
     setNewTitle(item.title);
     setNewDesc(item.description);
     setNewType(item.type);
     setNewPortions(item.portions);
     setIsNewHalal(item.is_halal);
-    setNewAddress(item.address);
+    setNewAddress('');
     setEditModalVisible(true);
+
+    const { data: address } = await supabase.rpc('get_donation_address', { donation_id: item.id });
+    if (address) {
+      setNewAddress(address);
+      setEditingDonation({ ...item, address, distance: address });
+    }
   };
 
   const handleUpdateDonation = async () => {
     if (!editingDonation) return;
+    if (!newTitle.trim() || !newAddress.trim()) {
+      showToast('Titre et adresse requis');
+      return;
+    }
+
     setIsPublishing(true);
     try {
+      const trimmedAddress = newAddress.trim();
+      const previousAddress = String(editingDonation.distance || '').trim();
+      const updatePayload: any = {
+        title: newTitle,
+        description: newDesc,
+        type: newType,
+        portions: newPortions || 'N/A',
+        is_halal: isNewHalal,
+        distance: trimmedAddress,
+      };
+
+      if (trimmedAddress !== previousAddress || !getDonationCoordinates(editingDonation)) {
+        const geocoded = await geocodeAddress(trimmedAddress);
+        if (!geocoded) {
+          showToast('Adresse introuvable, vérifiez le lieu de retrait');
+          return;
+        }
+
+        updatePayload.distance = geocoded.label;
+        updatePayload.city = geocoded.city;
+        updatePayload.latitude = geocoded.lat;
+        updatePayload.longitude = geocoded.lng;
+      }
+
       const { error } = await supabase
         .from('donations')
-        .update({
-          title: newTitle,
-          description: newDesc,
-          type: newType,
-          portions: newPortions,
-          is_halal: isNewHalal,
-          address: newAddress,
-        })
+        .update(updatePayload)
         .eq('id', editingDonation.id);
       
       if (!error) {
         showToast('Donation mise à jour !');
         setEditModalVisible(false);
         fetchDonations();
+        fetchMyDonations();
         // Clear states
         setNewTitle('');
         setNewDesc('');
@@ -879,7 +1125,8 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       } else {
         showToast('Erreur lors de la mise à jour');
       }
-    } catch (e) {
+    } catch (e: any) {
+      console.warn('App: Donation update error:', e.message || e);
       showToast('Erreur de connexion');
     } finally {
       setIsPublishing(false);
@@ -938,15 +1185,66 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
     return publicUrl;
   };
 
+  const handleUseMyLocationForAddress = async () => {
+    setIsLocatingAddress(true);
+    try {
+      const coords = await requestCurrentLocation();
+      setNewAddress(await reverseGeocode(coords));
+    } catch (e: any) {
+      showToast(e.message || 'Position GPS indisponible.');
+    }
+    setIsLocatingAddress(false);
+  };
+
+  const setExpiryDayOffset = (dayOffset: number) => {
+    setNewExpiresAt((prev) => {
+      const next = new Date();
+      next.setDate(next.getDate() + dayOffset);
+      next.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
+      return next;
+    });
+  };
+
+  const adjustExpiryHour = (delta: number) => {
+    setNewExpiresAt((prev) => {
+      const next = new Date(prev);
+      next.setHours(next.getHours() + delta);
+      return next;
+    });
+  };
+
+  const adjustExpiryMinute = (delta: number) => {
+    setNewExpiresAt((prev) => {
+      const next = new Date(prev);
+      next.setMinutes(next.getMinutes() + delta);
+      return next;
+    });
+  };
+
+  const formatExpiryLabel = (d: Date) =>
+    d.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+
   const handleAddDonation = async () => {
     if (!newTitle.trim() || !newAddress.trim()) {
       showToast('Titre et adresse requis');
       return;
     }
-    
+
+    if (newExpiresAt.getTime() <= Date.now()) {
+      showToast('La date/heure limite doit être dans le futur');
+      return;
+    }
+
     setIsPublishing(true);
 
     try {
+      const geocoded = await geocodeAddress(newAddress);
+      if (!geocoded) {
+        showToast('Adresse introuvable, vérifiez le lieu de retrait');
+        setIsPublishing(false);
+        return;
+      }
+
       let imageUrl = null;
       if (imageBase64) {
         imageUrl = await uploadImage(imageBase64);
@@ -957,13 +1255,14 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
         type: newType,
         description: newDesc,
         portions: newPortions || 'N/A',
-        distance: newAddress,
+        distance: geocoded.label,
+        city: geocoded.city,
         image: imageUrl || 'https://images.unsplash.com/photo-1498837167922-41cfa6f31027?ixlib=rb-4.0.3&w=800&q=80',
         user_id: session.user.id,
-        latitude: userLocation?.lat,
-        longitude: userLocation?.lng,
+        latitude: geocoded.lat,
+        longitude: geocoded.lng,
         is_halal: isNewHalal,
-        expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24h lifetime
+        expires_at: newExpiresAt.toISOString(),
       });
 
       if (error) throw error;
@@ -974,6 +1273,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       setNewDesc('');
       setNewPortions('');
       setNewAddress(profile.address); // Reset to default
+      setNewExpiresAt(new Date(Date.now() + 24 * 60 * 60 * 1000));
       setImageUri(null);
       setImageBase64(null);
       setIsNewHalal(false);
@@ -985,32 +1285,9 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
       }, 2000);
     } catch (e: any) {
       showToast(`Erreur: ${e.message}`);
-      console.log(e);
+      console.warn('App: Donation create error:', e.message || e);
     }
     setIsPublishing(false);
-  };
-
-  const handleEnhanceDescription = async () => {
-    if (!newTitle.trim()) {
-      showToast("Veuillez d'abord entrer un titre !");
-      return;
-    }
-    setIsEnhancingDesc(true);
-    const typeText = newType === 'plat' ? 'un plat cuisiné' : 'un ingrédient/surplus';
-    const prompt = `Tu es un assistant pour une application solidaire de don de nourriture. Rédige une description courte, chaleureuse et engageante (2 à 3 phrases maximum) pour le don suivant : "${newTitle}". Précise que c'est ${typeText}. N'oublie pas d'inviter poliment la personne à ramener ses propres contenants si nécessaire. Ne mets pas de guillemets.`;
-
-    const generatedText = await callGemini(prompt);
-    setNewDesc(generatedText.trim());
-    setIsEnhancingDesc(false);
-  };
-
-  const handleGenerateRecipe = async (item: any) => {
-    setRecipeLoadingId(item.id);
-    const prompt = `En tant que chef expert en cuisine anti-gaspillage, propose UNE idée de recette simple, rapide et gourmande (maximum 4 phrases claires) que l'on peut préparer en utilisant principalement cet ingrédient à sauver : "${item.title}". Utilise un ton enthousiaste et termine par un petit conseil anti-gaspi.`;
-
-    const recipeText = await callGemini(prompt);
-    setGeneratedRecipes((prev) => ({ ...prev, [item.id]: recipeText }));
-    setRecipeLoadingId(null);
   };
 
   const handleLogout = async () => {
@@ -1038,20 +1315,20 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               <>
                 <Text style={styles.modalTitle}>Demande pour :</Text>
                 <Text style={styles.modalDonationTitle}>{selectedDonation.title}</Text>
-                <Text style={styles.modalDonationMeta}>📍 {getRealOrMockDistance(selectedDonation)} • {getTimeAgo(selectedDonation.created_at)} • {selectedDonation.portions} portions dispos</Text>
+                <Text style={styles.modalDonationMeta}>📍 {getDonationDistanceLabel(selectedDonation)} • {getTimeAgo(selectedDonation.created_at)} • {selectedDonation.portions} portions dispos</Text>
 
                 <View style={{ marginTop: 20 }}>
                   <Text style={styles.label}>COMBIEN DE PORTIONS ?</Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
                     <TouchableOpacity 
-                      onPress={() => setRequestedPortions(Math.max(1, parseInt(requestedPortions)-1).toString())}
+                      onPress={() => setRequestedPortions(Math.max(1, (parsePortions(requestedPortions) || 1) - 1).toString())}
                       style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
                     >
                       <Text style={{ fontSize: 20, fontWeight: 'bold' }}>-</Text>
                     </TouchableOpacity>
                     <Text style={{ fontSize: 24, fontWeight: '900', color: COLORS.forest }}>{requestedPortions}</Text>
                     <TouchableOpacity 
-                      onPress={() => setRequestedPortions(Math.min(parseInt(selectedDonation.portions)||1, parseInt(requestedPortions)+1).toString())}
+                      onPress={() => setRequestedPortions(Math.min(parsePortions(selectedDonation.portions) || 1, (parsePortions(requestedPortions) || 1) + 1).toString())}
                       style={{ width: 40, height: 40, borderRadius: 20, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
                     >
                       <Text style={{ fontSize: 20, fontWeight: 'bold' }}>+</Text>
@@ -1115,30 +1392,22 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               <Text style={styles.subtitle}>Gérez vos dons actifs.</Text>
 
               <View style={{ gap: 16, marginTop: 12 }}>
-                {donations.filter(d => d.user_id === session.user.id).length === 0 ? (
+                {myDonations.length === 0 ? (
                   <View style={{ alignItems: 'center', marginTop: 40, opacity: 0.3 }}>
                     <Package color={COLORS.forest} size={48} />
                     <Text style={{ marginTop: 12, fontWeight: 'bold' }}>Vous n'avez aucun don actif</Text>
                   </View>
                 ) : (
-                  donations.filter(d => d.user_id === session.user.id).map((item) => (
+                  myDonations.map((item) => (
                     <View key={item.id} style={styles.manageCard}>
                       <Image source={{ uri: item.image }} style={styles.manageCardImage} />
                       <View style={{ flex: 1, marginLeft: 12 }}>
                         <Text style={styles.manageCardTitle} numberOfLines={1}>{item.title}</Text>
                         <Text style={styles.manageCardMeta}>{item.portions} portions • {getTimeAgo(item.created_at)}</Text>
                         <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-                          <TouchableOpacity 
-                            style={[styles.actionBtnSmall, { backgroundColor: `${COLORS.emerald}10` }]} 
-                            onPress={() => {
-                              setEditingDonation(item);
-                              setNewTitle(item.title);
-                              setNewDesc(item.description);
-                              setNewType(item.type);
-                              setNewAddress(item.address || '');
-                              setIsNewHalal(item.is_halal);
-                              setEditModalVisible(true);
-                            }}
+                          <TouchableOpacity
+                            style={[styles.actionBtnSmall, { backgroundColor: `${COLORS.emerald}10` }]}
+                            onPress={() => openEditModal(item)}
                           >
                             <Edit color={COLORS.emerald} size={14} />
                             <Text style={{ color: COLORS.emerald, fontSize: 10, fontWeight: 'bold', marginLeft: 4 }}>MODIFIER</Text>
@@ -1158,7 +1427,17 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               </View>
             </ScrollView>
           ) : exploreMode === 'list' ? (
-            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.scrollContent}
+              onScroll={({ nativeEvent }) => {
+                const { contentOffset, layoutMeasurement, contentSize } = nativeEvent;
+                if (contentOffset.y + layoutMeasurement.height >= contentSize.height - 300) {
+                  loadMoreDonations();
+                }
+              }}
+              scrollEventThrottle={200}
+            >
               <Text style={styles.title}>
                 Partagez plus, {'\n'}
                 <Text style={styles.titleHighlight}>gaspillez moins.</Text>
@@ -1172,7 +1451,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                     <Text style={{ color: COLORS.white, fontWeight: '900', fontSize: 10, letterSpacing: 1 }}>MISSION SAUVETAGE</Text>
                   </View>
                   <Text style={{ color: COLORS.white, fontSize: 12, fontWeight: '600', marginBottom: 12 }}>
-                    <Text style={{ fontWeight: '900' }}>{urgentMission.portions} portions de {urgentMission.title}</Text> d'urgence ! (À {getRealOrMockDistance(urgentMission)})
+                    <Text style={{ fontWeight: '900' }}>{urgentMission.portions} portions de {urgentMission.title}</Text> d'urgence ! (À {getDonationDistanceLabel(urgentMission)})
                   </Text>
                   <TouchableOpacity 
                     onPress={() => {
@@ -1217,17 +1496,17 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
               <View style={{ flexDirection: 'row', backgroundColor: `${COLORS.sand}50`, padding: 4, borderRadius: 16, marginBottom: 20 }}>
                 <TouchableOpacity 
                   onPress={() => setExploreMode('list')}
-                  style={{ flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: exploreMode === 'list' ? COLORS.white : 'transparent', borderRadius: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: exploreMode === 'list' ? 0.1 : 0, shadowRadius: 4, elevation: exploreMode === 'list' ? 2 : 0 }}
+                  style={{ flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: isExploreMode('list') ? COLORS.white : 'transparent', borderRadius: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: isExploreMode('list') ? 0.1 : 0, shadowRadius: 4, elevation: isExploreMode('list') ? 2 : 0 }}
                 >
-                  <Text style={{ fontSize: 12, fontWeight: '900', color: exploreMode === 'list' ? COLORS.forest : `${COLORS.forest}50` }}>Liste</Text>
+                  <Text style={{ fontSize: 12, fontWeight: '900', color: isExploreMode('list') ? COLORS.forest : `${COLORS.forest}50` }}>Liste</Text>
                 </TouchableOpacity>
                 <TouchableOpacity 
                   onPress={() => { setExploreMode('swipe'); setSwipeIndex(0); }}
-                  style={{ flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: exploreMode === 'swipe' ? COLORS.emerald : 'transparent', borderRadius: 12, shadowColor: COLORS.emerald, shadowOffset: { width: 0, height: 4 }, shadowOpacity: exploreMode === 'swipe' ? 0.3 : 0, shadowRadius: 6, elevation: exploreMode === 'swipe' ? 4 : 0 }}
+                  style={{ flex: 1, paddingVertical: 10, alignItems: 'center', backgroundColor: isExploreMode('swipe') ? COLORS.emerald : 'transparent', borderRadius: 12, shadowColor: COLORS.emerald, shadowOffset: { width: 0, height: 4 }, shadowOpacity: isExploreMode('swipe') ? 0.3 : 0, shadowRadius: 6, elevation: isExploreMode('swipe') ? 4 : 0 }}
                 >
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Zap color={exploreMode === 'swipe' ? COLORS.white : `${COLORS.forest}50`} size={14} fill={exploreMode === 'swipe' ? COLORS.white : 'transparent'} />
-                    <Text style={{ fontSize: 12, fontWeight: '900', color: exploreMode === 'swipe' ? COLORS.white : `${COLORS.forest}50` }}>Éclair</Text>
+                    <Zap color={isExploreMode('swipe') ? COLORS.white : `${COLORS.forest}50`} size={14} fill={isExploreMode('swipe') ? COLORS.white : 'transparent'} />
+                    <Text style={{ fontSize: 12, fontWeight: '900', color: isExploreMode('swipe') ? COLORS.white : `${COLORS.forest}50` }}>Éclair</Text>
                   </View>
                 </TouchableOpacity>
               </View>
@@ -1276,7 +1555,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                     <View key={item.id} style={styles.card}>
                       <TouchableOpacity 
                         activeOpacity={0.9} 
-                        onPress={() => { setViewingDonation(item); setDetailsModalVisible(true); }}
+                        onPress={() => openDonationDetails(item)}
                         style={{ flex: 1 }}
                       >
                         <View style={styles.cardImageContainer}>
@@ -1300,11 +1579,11 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                           <Text style={styles.cardDesc} numberOfLines={2}>{item.description}</Text>
                           <View style={styles.cardFooter}>
                             <View style={styles.userInfo}>
-                              <Image source={{ uri: item.profiles?.avatar_url || 'https://ui-avatars.com/api/?name=Anonyme' }} style={styles.userAvatar} />
+                              <Image source={{ uri: item.avatar_url || 'https://ui-avatars.com/api/?name=Anonyme' }} style={styles.userAvatar} />
                               <View>
-                                <Text style={styles.userName}>{item.profiles?.username || 'Anonyme'}</Text>
+                                <Text style={styles.userName}>{item.username || 'Anonyme'}</Text>
                                 <Text style={styles.userMeta}>
-                                  <MapPin color={COLORS.forest} size={10} opacity={0.5} /> {getRealOrMockDistance(item)} • {getTimeAgo(item.created_at)}
+                                  <MapPin color={COLORS.forest} size={10} opacity={0.5} /> {getDonationDistanceLabel(item)} • {getTimeAgo(item.created_at)}
                                 </Text>
                               </View>
                             </View>
@@ -1312,42 +1591,13 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                         </View>
                       </TouchableOpacity>
 
-                      {item.type === 'surplus' && !generatedRecipes[item.id] && (
-                        <TouchableOpacity
-                          style={styles.aiButton}
-                          onPress={() => handleGenerateRecipe(item)}
-                          disabled={recipeLoadingId === item.id}
-                        >
-                          {recipeLoadingId === item.id ? (
-                            <ActivityIndicator color={COLORS.sage} size="small" />
-                          ) : (
-                            <>
-                              <Sparkles color={COLORS.sage} size={16} />
-                              <Text style={styles.aiButtonText}>Que cuisiner avec ça ?</Text>
-                            </>
-                          )}
-                        </TouchableOpacity>
-                      )}
-
-                      {generatedRecipes[item.id] && (
-                        <View style={styles.recipeBox}>
-                          <TouchableOpacity 
-                            style={styles.recipeClose}
-                            onPress={() => setGeneratedRecipes(prev => { const next = {...prev}; delete next[item.id]; return next; })}
-                          >
-                            <X color={COLORS.forest} size={16} opacity={0.4} />
-                          </TouchableOpacity>
-                          <View style={styles.recipeHeader}>
-                            <Sparkles color={COLORS.sage} size={14} />
-                            <Text style={styles.recipeTitle}>L'IDÉE DU CHEF</Text>
-                          </View>
-                          <Text style={styles.recipeText}>"{generatedRecipes[item.id]}"</Text>
-                        </View>
-                      )}
                     </View>
                   ))
                 )}
               </View>
+              {isLoadingMoreDonations && (
+                <ActivityIndicator color={COLORS.forest} style={{ marginVertical: 20 }} />
+              )}
             </ScrollView>
           ) : (
             <View style={{ flex: 1, marginTop: 10, minHeight: 500 }}>
@@ -1557,10 +1807,6 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
 
                   <View style={styles.labelRow}>
                     <Text style={styles.label}>INGRÉDIENTS (Recommandé)</Text>
-                    <TouchableOpacity style={styles.magicBtn} onPress={handleEnhanceDescription} disabled={isEnhancingDesc}>
-                      {isEnhancingDesc ? <ActivityIndicator color={COLORS.terracotta} size="small" /> : <Sparkles color={COLORS.terracotta} size={14} />}
-                      <Text style={styles.magicBtnText}>Magie IA</Text>
-                    </TouchableOpacity>
                   </View>
                   <TextInput
                     style={styles.textArea}
@@ -1594,14 +1840,85 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                     </>
                   )}
 
-                  <Text style={[styles.label, { marginTop: 24 }]}>ADRESSE DE RETRAIT</Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Votre adresse (pré-remplie)"
-                    placeholderTextColor={`${COLORS.forest}40`}
-                    value={newAddress}
-                    onChangeText={setNewAddress}
-                  />
+                  <View style={styles.labelRow}>
+                    <Text style={[styles.label, { marginTop: 24 }]}>ADRESSE DE RETRAIT</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <TextInput
+                      style={[styles.input, { flex: 1 }]}
+                      placeholder="Votre adresse (pré-remplie)"
+                      placeholderTextColor={`${COLORS.forest}40`}
+                      value={newAddress}
+                      onChangeText={setNewAddress}
+                    />
+                    <TouchableOpacity
+                      onPress={handleUseMyLocationForAddress}
+                      disabled={isLocatingAddress}
+                      style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: `${COLORS.emerald}15`, justifyContent: 'center', alignItems: 'center' }}
+                    >
+                      {isLocatingAddress ? (
+                        <ActivityIndicator color={COLORS.emerald} size="small" />
+                      ) : (
+                        <Navigation color={COLORS.emerald} size={18} />
+                      )}
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={[styles.label, { marginTop: 24 }]}>DISPONIBLE JUSQU'À</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                    {[
+                      { label: "Aujourd'hui", offset: 0 },
+                      { label: 'Demain', offset: 1 },
+                      { label: '+2 jours', offset: 2 },
+                      { label: '+3 jours', offset: 3 },
+                    ].map(({ label, offset }) => {
+                      const target = new Date();
+                      target.setDate(target.getDate() + offset);
+                      const active = target.toDateString() === newExpiresAt.toDateString();
+                      return (
+                        <TouchableOpacity
+                          key={offset}
+                          onPress={() => setExpiryDayOffset(offset)}
+                          style={[styles.halalToggle, { flex: 1, marginBottom: 0 }, active && styles.halalToggleActive]}
+                        >
+                          <Text style={[styles.halalToggleText, active && { color: COLORS.oat }]}>{label}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <TouchableOpacity
+                        onPress={() => adjustExpiryHour(-1)}
+                        style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
+                      >
+                        <Text style={{ fontSize: 16, fontWeight: 'bold' }}>-</Text>
+                      </TouchableOpacity>
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: COLORS.forest, width: 30, textAlign: 'center' }}>H</Text>
+                      <TouchableOpacity
+                        onPress={() => adjustExpiryHour(1)}
+                        style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
+                      >
+                        <Text style={{ fontSize: 16, fontWeight: 'bold' }}>+</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={{ fontSize: 16, fontWeight: '900', color: COLORS.forest }}>{formatExpiryLabel(newExpiresAt)}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <TouchableOpacity
+                        onPress={() => adjustExpiryMinute(-15)}
+                        style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
+                      >
+                        <Text style={{ fontSize: 16, fontWeight: 'bold' }}>-</Text>
+                      </TouchableOpacity>
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: COLORS.forest, width: 30, textAlign: 'center' }}>MIN</Text>
+                      <TouchableOpacity
+                        onPress={() => adjustExpiryMinute(15)}
+                        style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: `${COLORS.forest}10`, justifyContent: 'center', alignItems: 'center' }}
+                      >
+                        <Text style={{ fontSize: 16, fontWeight: 'bold' }}>+</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
 
                   <TouchableOpacity style={styles.uploadBox} onPress={pickImage}>
                     {imageUri ? (
@@ -1631,15 +1948,15 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
             </View>
 
             <View style={styles.myDonationsGrid}>
-              {donations.filter(d => d.user_id === session.user.id).length === 0 ? (
+              {myDonations.length === 0 ? (
                 <View style={styles.emptyContainer}>
                   <Info color={`${COLORS.forest}20`} size={48} />
                   <Text style={styles.emptyText}>Vous n'avez pas encore publié de don.</Text>
                 </View>
               ) : (
-                donations.filter(d => d.user_id === session.user.id).map((item) => (
+                myDonations.map((item) => (
                   <View key={item.id} style={styles.manageCard}>
-                    <Image source={{ uri: item.image_url || 'https://via.placeholder.com/150' }} style={styles.manageCardImage} />
+                    <Image source={{ uri: item.image || 'https://via.placeholder.com/150' }} style={styles.manageCardImage} />
                     <View style={styles.manageCardContent}>
                       <Text style={styles.manageCardTitle} numberOfLines={1}>{item.title}</Text>
                       <Text style={styles.manageCardMeta}>{getTimeAgo(item.created_at)}</Text>
@@ -1681,7 +1998,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
 
             <View style={styles.statsRow}>
               <View style={styles.statItem}>
-                <Text style={styles.statValue}>{donations.filter(d => d.user_id === session.user.id).length}</Text>
+                <Text style={styles.statValue}>{myDonations.length}</Text>
                 <Text style={styles.statLabel}>Dons</Text>
               </View>
               <View style={styles.dividerStat} />
@@ -1944,7 +2261,7 @@ function MainScreen({ session, profile, onLogout }: { session: Session, profile:
                    </View>
                    <View style={{ backgroundColor: `${COLORS.forest}05`, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12, flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                       <MapPin color={COLORS.forest} size={14} />
-                      <Text style={{ color: COLORS.forest, fontWeight: 'bold', fontSize: 11 }}>{getRealOrMockDistance(viewingDonation)}</Text>
+                      <Text style={{ color: COLORS.forest, fontWeight: 'bold', fontSize: 11 }}>{getDonationDistanceLabel(viewingDonation)}</Text>
                    </View>
                 </View>
 
@@ -2170,6 +2487,9 @@ const styles = StyleSheet.create({
     paddingBottom: 120,
     paddingTop: 10,
   },
+  sectionHeader: {
+    marginBottom: 16,
+  },
   title: {
     fontSize: 32,
     fontWeight: 'bold',
@@ -2249,6 +2569,16 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 30,
     padding: 32,
     minHeight: 400,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  modalCloseBtn: {
+    alignSelf: 'flex-end',
+    padding: 8,
   },
   closeModalBtn: {
     alignSelf: 'flex-end',
@@ -2404,6 +2734,11 @@ const styles = StyleSheet.create({
     color: `${COLORS.forest}60`,
     marginTop: 40,
   },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 40,
+  },
   card: {
     marginBottom: 10,
   },
@@ -2468,53 +2803,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: 16,
   },
-  aiButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: `${COLORS.sand}40`,
-    borderWidth: 1,
-    borderColor: COLORS.sand,
-    borderStyle: 'dashed',
-    paddingVertical: 12,
-    borderRadius: 16,
-    marginBottom: 16,
-  },
-  aiButtonText: {
-    color: COLORS.forest,
-    fontSize: 14,
-    fontWeight: '600',
-    marginLeft: 8,
-  },
-  recipeBox: {
-    backgroundColor: `${COLORS.sage}20`,
-    padding: 16,
-    borderRadius: 20,
-    marginBottom: 16,
-  },
-  recipeClose: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-  },
-  recipeHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  recipeTitle: {
-    fontSize: 10,
-    fontWeight: 'bold',
-    color: COLORS.sage,
-    letterSpacing: 1,
-    marginLeft: 6,
-  },
-  recipeText: {
-    fontSize: 14,
-    color: COLORS.forest,
-    fontStyle: 'italic',
-    lineHeight: 22,
-  },
   cardFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -2557,6 +2845,32 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 16,
     marginBottom: 24,
+  },
+  typeRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 20,
+  },
+  typeBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.sand,
+  },
+  typeBtnActive: {
+    backgroundColor: COLORS.forest,
+    borderColor: COLORS.forest,
+  },
+  typeBtnText: {
+    color: COLORS.forest,
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  typeBtnTextActive: {
+    color: COLORS.oat,
   },
   typeBox: {
     flex: 1,
@@ -2614,16 +2928,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     marginTop: 16,
     marginBottom: 8,
-  },
-  magicBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  magicBtnText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.terracotta,
-    marginLeft: 4,
   },
   input: {
     borderBottomWidth: 1,
@@ -2729,19 +3033,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 10,
     elevation: 2,
-  },
-  navPlus: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: COLORS.emerald,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: COLORS.emerald,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    elevation: 8,
   },
   notifDot: {
     position: 'absolute',
@@ -2909,11 +3200,6 @@ const styles = StyleSheet.create({
   },
 
   // --- MODAL LARGE ---
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(27, 60, 53, 0.4)',
-    justifyContent: 'flex-end',
-  },
   modalContentLarge: {
     backgroundColor: COLORS.oat,
     borderTopLeftRadius: 40,

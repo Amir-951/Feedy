@@ -2,6 +2,9 @@
 #
 .DS_Store
 
+# Test account credentials (local dev only)
+.test-accounts.md
+
 # Xcode
 #
 build/
@@ -33,6 +36,7 @@ local.properties
 .cxx/
 *.keystore
 !debug.keystore
+keystore.properties
 .kotlin/
 
 # node.js
